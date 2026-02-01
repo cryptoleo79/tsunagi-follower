@@ -1,7 +1,2 @@
-# Zig build artifacts
-.zig-cache/
 zig-out/
-
-# OS noise
-.DS_Store
-*.swp
+.zig-cache/
