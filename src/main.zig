@@ -29,9 +29,19 @@ const Config = struct {
 };
 
 pub fn main() !void {
+    realMain() catch |err| switch (err) {
+        error.Interrupted => return,
+        else => return err,
+    };
+}
+
+fn realMain() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const cfg_alloc = arena.allocator();
 
     // Graceful Ctrl-C termination.
     const sa = std.posix.Sigaction{
@@ -92,8 +102,8 @@ pub fn main() !void {
 
     if (subcmd == .setup) {
         try ensureRepoRoot();
-        const cfg = try runSetupWizard(alloc, lang, default_host, default_port);
-        try writeConfigFile(alloc, cfg);
+        const cfg = try runSetupWizard(cfg_alloc, lang, default_host, default_port);
+        try writeConfigFile(cfg_alloc, cfg);
         if (lang == .jp) {
             std.debug.print("✅ tsunagi.toml を保存しました\n", .{});
         } else {
@@ -110,7 +120,7 @@ pub fn main() !void {
     };
     if (subcmd == .run) {
         try ensureRepoRoot();
-        if (readConfigFile(alloc)) |loaded| {
+        if (readConfigFile(cfg_alloc)) |loaded| {
             cfg = loaded;
         }
     }
