@@ -53,6 +53,38 @@ See `docs/pulse-demo.md` for a short demo and recording guide.
 日本語: `--pulse` を付けると、読みやすい表示（slot/短いハッシュ/経過時間/ロールバック）になります。
 デモと録画手順は `docs/pulse-demo.md` を参照してください。
 
+## Setup wizard / セットアップ
+
+English:
+- Run from the repo root (where `build.zig` is).
+- Interactive wizard:
+  ```bash
+  zig run src/main.zig -- setup
+  ```
+- Run using config:
+  ```bash
+  zig run src/main.zig -- run
+  ```
+- For English prompts:
+  ```bash
+  zig run src/main.zig -- setup --lang en
+  ```
+
+日本語:
+- リポジトリのルート（`build.zig` がある場所）で実行してください。
+- 対話式セットアップ:
+  ```bash
+  zig run src/main.zig -- setup
+  ```
+- 設定ファイルで実行:
+  ```bash
+  zig run src/main.zig -- run
+  ```
+- 英語でプロンプトを表示:
+  ```bash
+  zig run src/main.zig -- setup --lang en
+  ```
+
 ### クイックスタート（日本語）
 
 ビルド:

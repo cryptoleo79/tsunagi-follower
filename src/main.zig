@@ -11,6 +11,23 @@ fn onSigint(sig: c_int) callconv(.C) void {
     g_stop.store(true, .seq_cst);
 }
 
+const Lang = enum {
+    jp,
+    en,
+};
+
+const Subcommand = enum {
+    setup,
+    run,
+};
+
+const Config = struct {
+    network: []const u8,
+    host: []const u8,
+    port: u16,
+    pulse: bool,
+};
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -32,8 +49,12 @@ pub fn main() !void {
     defer std.process.argsFree(alloc, args);
 
     var pulse_mode = false;
-    var host: []const u8 = default_host;
-    var port: u16 = default_port;
+    var lang: Lang = .jp;
+    var subcmd: ?Subcommand = null;
+    var host: ?[]const u8 = null;
+    var port: ?u16 = null;
+
+    var nonflags: [3][]const u8 = undefined;
     var nonflag_count: usize = 0;
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
@@ -42,23 +63,66 @@ pub fn main() !void {
             pulse_mode = true;
             continue;
         }
-        if (nonflag_count == 0) {
-            host = a;
-            nonflag_count += 1;
+        if (std.mem.eql(u8, a, "--lang") and i + 1 < args.len) {
+            i += 1;
+            const v = args[i];
+            if (std.mem.eql(u8, v, "en")) lang = .en else lang = .jp;
             continue;
         }
-        if (nonflag_count == 1) {
-            port = try std.fmt.parseInt(u16, a, 10);
+        if (nonflag_count < nonflags.len) {
+            nonflags[nonflag_count] = a;
             nonflag_count += 1;
-            continue;
         }
     }
+    if (nonflag_count > 0) {
+        if (std.mem.eql(u8, nonflags[0], "setup")) {
+            subcmd = .setup;
+        } else if (std.mem.eql(u8, nonflags[0], "run")) {
+            subcmd = .run;
+        }
+    }
+    var pos_idx: usize = if (subcmd != null) 1 else 0;
+    if (pos_idx < nonflag_count) {
+        host = nonflags[pos_idx];
+        pos_idx += 1;
+    }
+    if (pos_idx < nonflag_count) {
+        port = try std.fmt.parseInt(u16, nonflags[pos_idx], 10);
+    }
+
+    if (subcmd == .setup) {
+        try ensureRepoRoot();
+        const cfg = try runSetupWizard(alloc, lang, default_host, default_port);
+        try writeConfigFile(alloc, cfg);
+        if (lang == .jp) {
+            std.debug.print("✅ tsunagi.toml を保存しました\n", .{});
+        } else {
+            std.debug.print("✅ saved tsunagi.toml\n", .{});
+        }
+        return;
+    }
+
+    var cfg = Config{
+        .network = "preview",
+        .host = default_host,
+        .port = default_port,
+        .pulse = false,
+    };
+    if (subcmd == .run) {
+        try ensureRepoRoot();
+        if (readConfigFile(alloc)) |loaded| {
+            cfg = loaded;
+        }
+    }
+    if (host) |h| cfg.host = h;
+    if (port) |p| cfg.port = p;
+    if (pulse_mode) cfg.pulse = true;
 
     std.debug.print("🌸 Tsunagi Follower v0.6e: Handshake v14 + ChainSync FindIntersect(origin) -> RequestNext\n", .{});
-    std.debug.print("Target: {s}:{d}\n\n", .{ host, port });
+    std.debug.print("Target: {s}:{d}\n\n", .{ cfg.host, cfg.port });
 
     // ---- TCP connect ----
-    const address_list = try std.net.getAddressList(alloc, host, port);
+    const address_list = try std.net.getAddressList(alloc, cfg.host, cfg.port);
     defer address_list.deinit();
 
     var stream_opt: ?std.net.Stream = null;
@@ -168,10 +232,10 @@ pub fn main() !void {
         } else if (find_tag == 6) {
             if (parseIntersectNotFoundTipPoint(resp.payload)) |tp| {
                 tip_point = tp;
-                if (pulse_mode) std.debug.print("⚠️ Intersect not found; retrying with tip point...\n", .{});
+        if (cfg.pulse) std.debug.print("⚠️ Intersect not found; retrying with tip point...\n", .{});
             } else {
                 tip_point = null;
-                if (pulse_mode) std.debug.print("⚠️ Intersect not found; retrying...\n", .{});
+        if (cfg.pulse) std.debug.print("⚠️ Intersect not found; retrying...\n", .{});
             }
             alloc.free(resp.payload);
             std.time.sleep(1 * std.time.ns_per_s);
@@ -221,7 +285,7 @@ pub fn main() !void {
             var pulsed = false;
             while (req_tag == 1) {
                 // MsgAwaitReply: keep waiting for RollForward/RollBackward
-                if (pulse_mode and !await_noted) {
+                if (cfg.pulse and !await_noted) {
                     std.debug.print("⏳ Awaiting next block...\n", .{});
                     await_noted = true;
                 }
@@ -238,7 +302,7 @@ pub fn main() !void {
                     alloc.free(await_resp.payload);
                     return error.InvalidChainSyncMessage;
                 };
-                if (pulse_mode and (req_tag == 2 or req_tag == 3)) {
+                if (cfg.pulse and (req_tag == 2 or req_tag == 3)) {
                     await_noted = false;
                     if (req_tag == 2) {
                         pulseRollForward(await_resp.payload, &last_roll_ms, &last_roll_slot);
@@ -253,7 +317,7 @@ pub fn main() !void {
                 std.debug.print("\n⚠️  Unexpected ChainSync tag after RequestNext: {d}\n", .{req_tag});
                 return error.InvalidChainSyncMessage;
             }
-            if (pulse_mode and !pulsed) {
+            if (cfg.pulse and !pulsed) {
                 await_noted = false;
                 if (req_tag == 2) {
                     pulseRollForward(req_resp.payload, &last_roll_ms, &last_roll_slot);
@@ -396,6 +460,132 @@ fn hexdump(bytes: []const u8) void {
         while (j < end) : (j += 1) std.debug.print("{x:0>2} ", .{bytes[j]});
         std.debug.print("\n", .{});
     }
+}
+
+fn ensureRepoRoot() !void {
+    std.fs.cwd().access("build.zig", .{}) catch return error.NotRepoRoot;
+}
+
+fn runSetupWizard(alloc: std.mem.Allocator, lang: Lang, default_host: []const u8, default_port: u16) !Config {
+    const stdin = std.io.getStdIn().reader();
+    const stdout = std.io.getStdOut().writer();
+
+    const default_network = "preview";
+    var network = default_network;
+    var host = default_host;
+    var port = default_port;
+    var pulse = false;
+
+    try printPrompt(stdout, lang, "ネットワーク (preview/preprod) [preview]: ", "Network (preview/preprod) [preview]: ");
+    if (try readLineAlloc(alloc, stdin)) |line| {
+        defer alloc.free(line);
+        const trimmed = std.mem.trim(u8, line, " \t\r\n");
+        if (trimmed.len > 0) {
+            if (std.mem.eql(u8, trimmed, "preprod")) network = "preprod" else network = "preview";
+        }
+    }
+
+    try printPrompt(stdout, lang, "ホスト [preview-node.world.dev.cardano.org]: ", "Host [preview-node.world.dev.cardano.org]: ");
+    if (try readLineAlloc(alloc, stdin)) |line| {
+        defer alloc.free(line);
+        const trimmed = std.mem.trim(u8, line, " \t\r\n");
+        if (trimmed.len > 0) host = try alloc.dupe(u8, trimmed);
+    }
+
+    try printPrompt(stdout, lang, "ポート [30002]: ", "Port [30002]: ");
+    if (try readLineAlloc(alloc, stdin)) |line| {
+        defer alloc.free(line);
+        const trimmed = std.mem.trim(u8, line, " \t\r\n");
+        if (trimmed.len > 0) port = try std.fmt.parseInt(u16, trimmed, 10);
+    }
+
+    try printPrompt(stdout, lang, "パルス表示を有効にしますか? (y/N): ", "Enable pulse output? (y/N): ");
+    if (try readLineAlloc(alloc, stdin)) |line| {
+        defer alloc.free(line);
+        const trimmed = std.mem.trim(u8, line, " \t\r\n");
+        if (trimmed.len > 0) pulse = parseBool(trimmed) orelse false;
+    }
+
+    return .{
+        .network = network,
+        .host = host,
+        .port = port,
+        .pulse = pulse,
+    };
+}
+
+fn writeConfigFile(alloc: std.mem.Allocator, cfg: Config) !void {
+    _ = alloc;
+    var file = try std.fs.cwd().createFile("tsunagi.toml", .{ .truncate = true });
+    defer file.close();
+    const w = file.writer();
+    try w.print("network = \"{s}\"\n", .{cfg.network});
+    try w.print("host = \"{s}\"\n", .{cfg.host});
+    try w.print("port = {d}\n", .{cfg.port});
+    try w.print("pulse = {s}\n", .{if (cfg.pulse) "true" else "false"});
+}
+
+fn readConfigFile(alloc: std.mem.Allocator) ?Config {
+    var file = std.fs.cwd().openFile("tsunagi.toml", .{}) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return null,
+    };
+    defer file.close();
+
+    const data = file.readToEndAlloc(alloc, 64 * 1024) catch return null;
+    defer alloc.free(data);
+
+    var cfg = Config{
+        .network = "preview",
+        .host = "preview-node.world.dev.cardano.org",
+        .port = 30002,
+        .pulse = false,
+    };
+
+    var it = std.mem.splitScalar(u8, data, '\n');
+    while (it.next()) |line_raw| {
+        const line = std.mem.trim(u8, line_raw, " \t\r\n");
+        if (line.len == 0) continue;
+        if (std.mem.startsWith(u8, line, "#")) continue;
+        const eq_idx = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+        const key = std.mem.trim(u8, line[0..eq_idx], " \t\r\n");
+        const val_raw = std.mem.trim(u8, line[eq_idx + 1 ..], " \t\r\n");
+        if (std.mem.eql(u8, key, "network")) {
+            if (parseString(val_raw)) |s| cfg.network = alloc.dupe(u8, s) catch cfg.network;
+        } else if (std.mem.eql(u8, key, "host")) {
+            if (parseString(val_raw)) |s| cfg.host = alloc.dupe(u8, s) catch cfg.host;
+        } else if (std.mem.eql(u8, key, "port")) {
+            cfg.port = std.fmt.parseInt(u16, val_raw, 10) catch cfg.port;
+        } else if (std.mem.eql(u8, key, "pulse")) {
+            if (parseBool(val_raw)) |b| cfg.pulse = b;
+        }
+    }
+    return cfg;
+}
+
+fn parseString(val: []const u8) ?[]const u8 {
+    if (val.len >= 2 and val[0] == '"' and val[val.len - 1] == '"') {
+        return val[1 .. val.len - 1];
+    }
+    return null;
+}
+
+fn parseBool(val: []const u8) ?bool {
+    if (std.mem.eql(u8, val, "true") or std.mem.eql(u8, val, "yes") or std.mem.eql(u8, val, "y") or std.mem.eql(u8, val, "1")) return true;
+    if (std.mem.eql(u8, val, "false") or std.mem.eql(u8, val, "no") or std.mem.eql(u8, val, "n") or std.mem.eql(u8, val, "0")) return false;
+    return null;
+}
+
+fn printPrompt(w: anytype, lang: Lang, jp: []const u8, en: []const u8) !void {
+    if (lang == .jp) {
+        try w.writeAll(jp);
+    } else {
+        try w.writeAll(en);
+    }
+}
+
+fn readLineAlloc(alloc: std.mem.Allocator, r: anytype) !?[]u8 {
+    return r.readUntilDelimiterOrEofAlloc(alloc, '\n', 1024);
 }
 
 fn readFirstCborInt(payload: []const u8) ?i64 {
