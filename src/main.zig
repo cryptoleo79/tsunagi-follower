@@ -5,6 +5,7 @@ const cbor = @import("cbor.zig");
 // This is required by the spec; wrong M commonly causes ConnectionResetByPeer. (See spec 2.1.1) :contentReference[oaicite:1]{index=1}
 
 var g_stop = std.atomic.Value(bool).init(false);
+var g_lang: Lang = .jp;
 
 fn onSigint(sig: c_int) callconv(.C) void {
     _ = sig;
@@ -30,7 +31,14 @@ const Config = struct {
 
 pub fn main() !void {
     realMain() catch |err| switch (err) {
-        error.Interrupted => return,
+        error.Interrupted => {
+            if (g_lang == .jp) {
+                std.debug.print("安全に終了しました\n", .{});
+            } else {
+                std.debug.print("Exited cleanly\n", .{});
+            }
+            return;
+        },
         else => return err,
     };
 }
@@ -109,6 +117,10 @@ fn realMain() !void {
         } else {
             std.debug.print("✅ saved tsunagi.toml\n", .{});
         }
+        if (try askRunNow(cfg_alloc, lang)) {
+            g_lang = lang;
+            try runFollower(alloc, cfg);
+        }
         return;
     }
 
@@ -127,7 +139,12 @@ fn realMain() !void {
     if (host) |h| cfg.host = h;
     if (port) |p| cfg.port = p;
     if (pulse_mode) cfg.pulse = true;
+    g_lang = lang;
 
+    try runFollower(alloc, cfg);
+}
+
+fn runFollower(alloc: std.mem.Allocator, cfg: Config) !void {
     std.debug.print("🌸 Tsunagi Follower v0.6e: Handshake v14 + ChainSync FindIntersect(origin) -> RequestNext\n", .{});
     std.debug.print("Target: {s}:{d}\n\n", .{ cfg.host, cfg.port });
 
@@ -242,10 +259,10 @@ fn realMain() !void {
         } else if (find_tag == 6) {
             if (parseIntersectNotFoundTipPoint(resp.payload)) |tp| {
                 tip_point = tp;
-        if (cfg.pulse) std.debug.print("⚠️ Intersect not found; retrying with tip point...\n", .{});
+                if (cfg.pulse) std.debug.print("⚠️ Intersect not found; retrying with tip point...\n", .{});
             } else {
                 tip_point = null;
-        if (cfg.pulse) std.debug.print("⚠️ Intersect not found; retrying...\n", .{});
+                if (cfg.pulse) std.debug.print("⚠️ Intersect not found; retrying...\n", .{});
             }
             alloc.free(resp.payload);
             std.time.sleep(1 * std.time.ns_per_s);
@@ -522,6 +539,19 @@ fn runSetupWizard(alloc: std.mem.Allocator, lang: Lang, default_host: []const u8
         .port = port,
         .pulse = pulse,
     };
+}
+
+fn askRunNow(alloc: std.mem.Allocator, lang: Lang) !bool {
+    const stdin = std.io.getStdIn().reader();
+    const stdout = std.io.getStdOut().writer();
+    try printPrompt(stdout, lang, "この設定で今すぐ実行しますか? (y/N): ", "Run now with this config? (y/N): ");
+    if (try readLineAlloc(alloc, stdin)) |line| {
+        defer alloc.free(line);
+        const trimmed = std.mem.trim(u8, line, " \t\r\n");
+        if (trimmed.len == 0) return false;
+        return parseBool(trimmed) orelse false;
+    }
+    return false;
 }
 
 fn writeConfigFile(alloc: std.mem.Allocator, cfg: Config) !void {

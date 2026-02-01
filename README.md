@@ -70,6 +70,13 @@ English:
   zig run src/main.zig -- setup --lang en
   ```
 
+### Absolute beginner quickstart (EN)
+- Install Zig (0.13.x).
+- Run `zig run src/main.zig -- setup`.
+- Press Enter to accept defaults.
+- Run `zig run src/main.zig -- run`.
+- Stop with Ctrl+C.
+
 日本語:
 - リポジトリのルート（`build.zig` がある場所）で実行してください。
 - 対話式セットアップ:
@@ -84,6 +91,13 @@ English:
   ```bash
   zig run src/main.zig -- setup --lang en
   ```
+
+### はじめてのクイックスタート（JP）
+- Zig(0.13.x)を入れます。
+- `zig run src/main.zig -- setup` を実行。
+- Enterでデフォルトを選びます。
+- `zig run src/main.zig -- run` を実行。
+- 終了はCtrl+C。
 
 ### クイックスタート（日本語）
 
