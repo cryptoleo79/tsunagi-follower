@@ -89,6 +89,8 @@ zig run src/main.zig -- preview-node.world.dev.cardano.org 30002
 
 ## Changelog
 
+- v0.1.2: Retry FindIntersect with tip+origin on IntersectNotFound, fix ChainSync tags, and make Ctrl-C exit quickly (socket timeout).
+- v0.1.2: IntersectNotFound時にtip+originで再試行、ChainSyncタグ修正、Ctrl-Cを即時終了に（ソケットタイムアウト）。
 - v0.1.1: Handle ChainSync MsgAwaitReply (5) correctly after RequestNext; fix payload freeing in AwaitReply loop.
 - v0.1.1: RequestNext後のChainSync MsgAwaitReply (5) を正しく扱い、AwaitReplyループのペイロード解放を修正。
 - v0.1.0: Initial preview release (minimal node-to-node ChainSync follower).
