@@ -135,7 +135,24 @@ pub fn main() !void {
             });
             hexdump(req_resp.payload);
             if (req_resp.mini_proto != 2 or req_resp.initiator_mode) return error.UnexpectedMuxFrame;
-            const req_tag = readChainSyncTag(req_resp.payload) orelse return error.InvalidChainSyncMessage;
+            var req_tag = readChainSyncTag(req_resp.payload) orelse return error.InvalidChainSyncMessage;
+            while (req_tag == 5) {
+                // MsgAwaitReply: keep waiting for RollForward/RollBackward
+                const await_resp = try muxReadOneChainSync(alloc, &stream);
+                std.debug.print("\n📥 RequestNext resp: mode(initiator?)={any} miniProto={d} len={d}\n", .{
+                    await_resp.initiator_mode, await_resp.mini_proto, await_resp.payload_len
+                });
+                hexdump(await_resp.payload);
+                if (await_resp.mini_proto != 2 or await_resp.initiator_mode) {
+                    alloc.free(await_resp.payload);
+                    return error.UnexpectedMuxFrame;
+                }
+                req_tag = readChainSyncTag(await_resp.payload) orelse {
+                    alloc.free(await_resp.payload);
+                    return error.InvalidChainSyncMessage;
+                };
+                alloc.free(await_resp.payload);
+            }
             if (req_tag != 3 and req_tag != 4) {
                 std.debug.print("\n⚠️  Unexpected ChainSync tag after RequestNext: {d}\n", .{req_tag});
                 return error.InvalidChainSyncMessage;
