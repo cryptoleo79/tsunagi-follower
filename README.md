@@ -2,6 +2,13 @@
 
 ![GitHub release (latest SemVer)](https://img.shields.io/github/v/release/cryptoleo79/tsunagi-follower)
 
+A tiny, diagnostic node-to-node ChainSync follower for the Cardano preview network.
+It is meant for learning and debugging protocol flows, not for running a full node.
+If you're new, this repo aims to keep things simple and readable.
+
+Cardanoのpreviewネットワーク向けに作られた、最小構成の診断用node-to-node ChainSyncフォロワーです。
+プロトコルの流れを学んだりデバッグしたりするためのもので、フルノードではありません。
+初心者の方にも読みやすい構成を目指しています。
 
 A minimal Cardano **node-to-node ChainSync** client that:
 - performs the node-to-node handshake (v14),
@@ -41,10 +48,36 @@ zig run src/main.zig -- preview-node.world.dev.cardano.org 30002
 
 Note: this is a diagnostic ChainSync follower for learning and debugging, not a full Cardano node.
 
+### クイックスタート（日本語）
+
+ビルド:
+```bash
+zig build
+```
+
+実行（previewネットワーク）:
+```bash
+zig run src/main.zig -- preview-node.world.dev.cardano.org 30002
+```
+
+注意: これは学習・デバッグ用のChainSyncフォロワーであり、フルのCardanoノードではありません。
+
+## Vision / ビジョン
+
+- Lightweight and easy to read, even for beginners.
+- Clear, minimal diagnostics for ChainSync and mux behavior.
+- Graceful shutdown and community-friendly focus.
+
+- 初心者にも読みやすい軽量なコードを目指します。
+- ChainSyncとmuxの挙動を分かりやすく診断できるようにします。
+- 安全な終了処理とコミュニティ志向を大切にします。
+
 ## Changelog
 
 - v0.1.1: Handle ChainSync MsgAwaitReply (5) correctly after RequestNext; fix payload freeing in AwaitReply loop.
+- v0.1.1: RequestNext後のChainSync MsgAwaitReply (5) を正しく扱い、AwaitReplyループのペイロード解放を修正。
 - v0.1.0: Initial preview release (minimal node-to-node ChainSync follower).
+- v0.1.0: 初期previewリリース（最小構成のnode-to-node ChainSyncフォロワー）。
 
 ## Key design decisions
 
