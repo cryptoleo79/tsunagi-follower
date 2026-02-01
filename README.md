@@ -1,5 +1,8 @@
 # Tsunagi Follower (preview)
 
+![GitHub release (latest SemVer)](https://img.shields.io/github/v/release/cryptoleo79/tsunagi-follower)
+
+
 A minimal Cardano **node-to-node ChainSync** client that:
 - performs the node-to-node handshake (v14),
 - sends `MsgFindIntersect`,
