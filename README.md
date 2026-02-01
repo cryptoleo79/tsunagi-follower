@@ -48,6 +48,9 @@ zig run src/main.zig -- preview-node.world.dev.cardano.org 30002
 
 Note: this is a diagnostic ChainSync follower for learning and debugging, not a full Cardano node.
 
+Optional: add `--pulse` for a calm, human‑readable stream (slot, short hash, time delta, rollbacks).
+日本語: `--pulse` を付けると、読みやすい表示（slot/短いハッシュ/経過時間/ロールバック）になります。
+
 ### クイックスタート（日本語）
 
 ビルド:

@@ -30,8 +30,28 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(alloc);
     defer std.process.argsFree(alloc, args);
 
-    const host = if (args.len >= 2) args[1] else default_host;
-    const port: u16 = if (args.len >= 3) try std.fmt.parseInt(u16, args[2], 10) else default_port;
+    var pulse_mode = false;
+    var host: []const u8 = default_host;
+    var port: u16 = default_port;
+    var nonflag_count: usize = 0;
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+        if (std.mem.eql(u8, a, "--pulse")) {
+            pulse_mode = true;
+            continue;
+        }
+        if (nonflag_count == 0) {
+            host = a;
+            nonflag_count += 1;
+            continue;
+        }
+        if (nonflag_count == 1) {
+            port = try std.fmt.parseInt(u16, a, 10);
+            nonflag_count += 1;
+            continue;
+        }
+    }
 
     std.debug.print("🌸 Tsunagi Follower v0.6e: Handshake v14 + ChainSync FindIntersect(origin) -> RequestNext\n", .{});
     std.debug.print("Target: {s}:{d}\n\n", .{ host, port });
@@ -115,6 +135,9 @@ pub fn main() !void {
         if (!validateIntersectFoundPoint(find_resp.payload)) return error.InvalidChainSyncMessage;
         var iter: usize = 0;
         const max_iters: usize = 100;
+        var last_roll_ms: ?i64 = null;
+        var last_roll_slot: ?u64 = null;
+        var await_noted = false;
         while (iter < max_iters and !g_stop.load(.seq_cst)) : (iter += 1) {
             const req_payload = try buildChainSyncRequestNext(alloc);
             defer alloc.free(req_payload);
@@ -136,8 +159,13 @@ pub fn main() !void {
             hexdump(req_resp.payload);
             if (req_resp.mini_proto != 2 or req_resp.initiator_mode) return error.UnexpectedMuxFrame;
             var req_tag = readChainSyncTag(req_resp.payload) orelse return error.InvalidChainSyncMessage;
+            var pulsed = false;
             while (req_tag == 5) {
                 // MsgAwaitReply: keep waiting for RollForward/RollBackward
+                if (pulse_mode and !await_noted) {
+                    std.debug.print("⏳ Awaiting next block...\n", .{});
+                    await_noted = true;
+                }
                 const await_resp = try muxReadOneChainSync(alloc, &stream);
                 std.debug.print("\n📥 RequestNext resp: mode(initiator?)={any} miniProto={d} len={d}\n", .{
                     await_resp.initiator_mode, await_resp.mini_proto, await_resp.payload_len
@@ -151,11 +179,28 @@ pub fn main() !void {
                     alloc.free(await_resp.payload);
                     return error.InvalidChainSyncMessage;
                 };
+                if (pulse_mode and (req_tag == 3 or req_tag == 4)) {
+                    await_noted = false;
+                    if (req_tag == 3) {
+                        pulseRollForward(await_resp.payload, &last_roll_ms, &last_roll_slot);
+                    } else {
+                        pulseRollBackward(await_resp.payload, last_roll_slot);
+                    }
+                    pulsed = true;
+                }
                 alloc.free(await_resp.payload);
             }
             if (req_tag != 3 and req_tag != 4) {
                 std.debug.print("\n⚠️  Unexpected ChainSync tag after RequestNext: {d}\n", .{req_tag});
                 return error.InvalidChainSyncMessage;
+            }
+            if (pulse_mode and !pulsed) {
+                await_noted = false;
+                if (req_tag == 3) {
+                    pulseRollForward(req_resp.payload, &last_roll_ms, &last_roll_slot);
+                } else if (req_tag == 4) {
+                    pulseRollBackward(req_resp.payload, last_roll_slot);
+                }
             }
         }
         if (g_stop.load(.seq_cst)) {
@@ -403,6 +448,130 @@ fn validateIntersectFoundPoint(payload: []const u8) bool {
         return validatePointAt(payload, idx) != null;
     }
     return validatePointAt(payload, idx) != null;
+}
+
+const PointInfo = struct {
+    slot: u64,
+    hash: [32]u8,
+};
+
+fn parsePointAt(payload: []const u8, idx: usize) ?struct { next: usize, point: PointInfo } {
+    const h = readCborHead(payload, idx) orelse return null;
+    if (h.major != 4 or h.val != 2) return null;
+    var i = idx + h.hdr_len;
+    const slot_h = readCborHead(payload, i) orelse return null;
+    if (slot_h.major != 0) return null;
+    const slot = slot_h.val;
+    i += slot_h.hdr_len;
+    const hash_h = readCborHead(payload, i) orelse return null;
+    if (hash_h.major != 2 or hash_h.val != 32) return null;
+    i += hash_h.hdr_len;
+    if (i + 32 > payload.len) return null;
+    var hash: [32]u8 = undefined;
+    @memcpy(hash[0..], payload[i .. i + 32]);
+    i += 32;
+    return .{ .next = i, .point = .{ .slot = slot, .hash = hash } };
+}
+
+fn skipCborItem(payload: []const u8, idx: usize) ?usize {
+    const h = readCborHead(payload, idx) orelse return null;
+    var i = idx + h.hdr_len;
+    switch (h.major) {
+        0, 1 => return i,
+        2, 3 => {
+            const end = i + @as(usize, @intCast(h.val));
+            if (end > payload.len) return null;
+            return end;
+        },
+        4 => {
+            var n: u64 = 0;
+            while (n < h.val) : (n += 1) {
+                i = skipCborItem(payload, i) orelse return null;
+            }
+            return i;
+        },
+        5 => {
+            var n: u64 = 0;
+            while (n < h.val * 2) : (n += 1) {
+                i = skipCborItem(payload, i) orelse return null;
+            }
+            return i;
+        },
+        else => return null,
+    }
+}
+
+fn scanForPoint(payload: []const u8, idx: usize) ?PointInfo {
+    if (parsePointAt(payload, idx)) |res| return res.point;
+    const h = readCborHead(payload, idx) orelse return null;
+    var i = idx + h.hdr_len;
+    switch (h.major) {
+        4 => {
+            var n: u64 = 0;
+            while (n < h.val) : (n += 1) {
+                if (scanForPoint(payload, i)) |p| return p;
+                i = skipCborItem(payload, i) orelse return null;
+            }
+        },
+        5 => {
+            var n: u64 = 0;
+            while (n < h.val * 2) : (n += 1) {
+                if (scanForPoint(payload, i)) |p| return p;
+                i = skipCborItem(payload, i) orelse return null;
+            }
+        },
+        else => {},
+    }
+    return null;
+}
+
+fn hexNibble(n: u8) u8 {
+    return if (n < 10) n + '0' else (n - 10) + 'a';
+}
+
+fn shortHashHex(hash: [32]u8, out: []u8) []const u8 {
+    var i: usize = 0;
+    var o: usize = 0;
+    while (i < 6 and o + 1 < out.len) : (i += 1) {
+        const b = hash[i];
+        out[o] = hexNibble(b >> 4);
+        out[o + 1] = hexNibble(b & 0x0f);
+        o += 2;
+    }
+    return out[0..o];
+}
+
+fn pulseRollForward(payload: []const u8, last_roll_ms: *?i64, last_roll_slot: *?u64) void {
+    const p = scanForPoint(payload, 0) orelse {
+        std.debug.print("▶️ RollForward\n", .{});
+        return;
+    };
+    var hash_buf: [12]u8 = undefined;
+    const hash_short = shortHashHex(p.hash, &hash_buf);
+    const now = std.time.milliTimestamp();
+    if (last_roll_ms.*) |prev| {
+        const delta = now - prev;
+        std.debug.print("▶️ RollForward slot={d} hash={s} Δ{d}ms\n", .{ p.slot, hash_short, delta });
+    } else {
+        std.debug.print("▶️ RollForward slot={d} hash={s}\n", .{ p.slot, hash_short });
+    }
+    last_roll_ms.* = now;
+    last_roll_slot.* = p.slot;
+}
+
+fn pulseRollBackward(payload: []const u8, last_roll_slot: ?u64) void {
+    const p = scanForPoint(payload, 0) orelse {
+        std.debug.print("⏪ RollBackward\n", .{});
+        return;
+    };
+    if (last_roll_slot) |prev| {
+        if (prev >= p.slot) {
+            const depth = prev - p.slot;
+            std.debug.print("⏪ RollBackward slot={d} depth={d}\n", .{ p.slot, depth });
+            return;
+        }
+    }
+    std.debug.print("⏪ RollBackward slot={d}\n", .{ p.slot });
 }
 
 // ===== minimal CBOR builders (hardcoded for now) =====
