@@ -1,6 +1,9 @@
-# Tsunagi Follower (preview)
+# TSUNAGI (Tsunagi Follower)
 
 ![GitHub release (latest SemVer)](https://img.shields.io/github/v/release/cryptoleo79/tsunagi-follower)
+
+TSUNAGIはSPOファーストの橋渡しプロジェクトです。日本語ファースト、丁寧な“おもてなし”を大切にし、Layer‑0で人とネットワークをつなぎます。
+このリポジトリは現在「TSUNAGI Follower」を提供しており、「TSUNAGI Node」は同じリポジトリのロードマップ項目です。
 
 A tiny, diagnostic node-to-node ChainSync follower for the Cardano preview network.
 It is meant for learning and debugging protocol flows, not for running a full node.
@@ -9,6 +12,14 @@ If you're new, this repo aims to keep things simple and readable.
 Cardanoのpreviewネットワーク向けに作られた、最小構成の診断用node-to-node ChainSyncフォロワーです。
 プロトコルの流れを学んだりデバッグしたりするためのもので、フルノードではありません。
 初心者の方にも読みやすい構成を目指しています。
+
+## TSUNAGI Project
+
+短いプロジェクト紹介と方針は以下にまとめています:
+- `docs/TSUNAGI_MANIFESTO.md`
+- `docs/TSUNAGI_FOR_SPO.md`
+- `docs/TSUNAGI_NODE_M0.md`
+- `ROADMAP.md`
 
 A minimal Cardano **node-to-node ChainSync** client that:
 - performs the node-to-node handshake (v14),
