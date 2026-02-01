@@ -27,6 +27,20 @@ You can pass a host/port as arguments. Defaults are:
 - host: `preview-node.world.dev.cardano.org`
 - port: `30002`
 
+## Quickstart
+
+Build:
+```bash
+zig build
+```
+
+Run (preview network):
+```bash
+zig run src/main.zig -- preview-node.world.dev.cardano.org 30002
+```
+
+Note: this is a diagnostic ChainSync follower for learning and debugging, not a full Cardano node.
+
 ## Key design decisions
 
 - **FindIntersect encoding**  
