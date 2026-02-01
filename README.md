@@ -41,6 +41,11 @@ zig run src/main.zig -- preview-node.world.dev.cardano.org 30002
 
 Note: this is a diagnostic ChainSync follower for learning and debugging, not a full Cardano node.
 
+## Changelog
+
+- v0.1.1: Handle ChainSync MsgAwaitReply (5) correctly after RequestNext; fix payload freeing in AwaitReply loop.
+- v0.1.0: Initial preview release (minimal node-to-node ChainSync follower).
+
 ## Key design decisions
 
 - **FindIntersect encoding**  
