@@ -1,4 +1,5 @@
 const std = @import("std");
+const cbor = @import("cbor.zig");
 
 // v0.6e: Fix mux Mode bit (M): 0=initiator, 1=responder.
 // This is required by the spec; wrong M commonly causes ConnectionResetByPeer. (See spec 2.1.1) :contentReference[oaicite:1]{index=1}
@@ -70,6 +71,15 @@ pub fn main() !void {
     var stream = stream_opt.?;
     defer stream.close();
 
+    // Short recv timeout so Ctrl-C can break blocking reads promptly.
+    const tv = std.posix.timeval{ .tv_sec = 0, .tv_usec = 200_000 };
+    try std.posix.setsockopt(
+        stream.handle,
+        std.posix.SOL.SOCKET,
+        std.posix.SO.RCVTIMEO,
+        std.mem.asBytes(&tv),
+    );
+
     std.debug.print("✅ TCP connected\n\n", .{});
 
     // =========================
@@ -107,30 +117,79 @@ pub fn main() !void {
     // ==================================
     // Spec: ChainSync node-to-node mini-protocol number is 2. :contentReference[oaicite:4]{index=4}
     // msgFindIntersect = [4, base.points] :contentReference[oaicite:5]{index=5}
-    // We'll send points=[null] meaning "origin" (genesis).
-    const find_payload = try buildChainSyncFindIntersectOrigin(alloc);
-    defer alloc.free(find_payload);
+    var find_resp: MuxMsg = undefined;
+    var have_find = false;
+    var tip_point: ?PointInfo = null;
+    var attempt: usize = 0;
+    const max_attempts: usize = 5;
+    while (attempt < max_attempts and !g_stop.load(.seq_cst)) : (attempt += 1) {
+        var points_buf: [2]PointInfo = undefined;
+        var points: []const PointInfo = undefined;
+        const origin = makeOriginPoint();
+        if (tip_point) |tp| {
+            points_buf[0] = tp;
+            points_buf[1] = origin;
+            points = points_buf[0..2];
+        } else {
+            points_buf[0] = origin;
+            points = points_buf[0..1];
+        }
 
-    std.debug.print("\n📦 ChainSync FindIntersect payload: {d} bytes\n", .{find_payload.len});
-    hexdump(find_payload);
+        const find_payload = try buildChainSyncFindIntersectWithPoints(alloc, points);
+        defer alloc.free(find_payload);
 
-    const find_sdu = try muxEncode(alloc, true, 2, find_payload);
-    defer alloc.free(find_sdu);
+        std.debug.print("\n📦 ChainSync FindIntersect payload: {d} bytes\n", .{find_payload.len});
+        hexdump(find_payload);
 
-    try stream.writer().writeAll(find_sdu);
+        const find_sdu = try muxEncode(alloc, true, 2, find_payload);
+        defer alloc.free(find_sdu);
 
-    const find_resp = try muxReadOneChainSync(alloc, &stream);
+        try stream.writer().writeAll(find_sdu);
+
+        const resp = try muxReadOneChainSync(alloc, &stream);
+        std.debug.print("\n📥 ChainSync resp: mode(initiator?)={any} miniProto={d} len={d}\n", .{
+            resp.initiator_mode, resp.mini_proto, resp.payload_len
+        });
+        hexdump(resp.payload);
+
+        // Validate ChainSync response framing and tag before requesting next.
+        if (resp.mini_proto != 2 or resp.initiator_mode) {
+            alloc.free(resp.payload);
+            return error.UnexpectedMuxFrame;
+        }
+        const find_tag = readChainSyncTag(resp.payload) orelse {
+            alloc.free(resp.payload);
+            return error.InvalidChainSyncMessage;
+        };
+        if (find_tag == 5) {
+            find_resp = resp;
+            have_find = true;
+            break;
+        } else if (find_tag == 6) {
+            if (parseIntersectNotFoundTipPoint(resp.payload)) |tp| {
+                tip_point = tp;
+                if (pulse_mode) std.debug.print("⚠️ Intersect not found; retrying with tip point...\n", .{});
+            } else {
+                tip_point = null;
+                if (pulse_mode) std.debug.print("⚠️ Intersect not found; retrying...\n", .{});
+            }
+            alloc.free(resp.payload);
+            std.time.sleep(1 * std.time.ns_per_s);
+            continue;
+        } else {
+            alloc.free(resp.payload);
+            return error.InvalidChainSyncMessage;
+        }
+    }
+    if (!have_find) {
+        std.debug.print("\n❌ Failed to find intersect after {d} attempts\n", .{max_attempts});
+        return error.IntersectNotFound;
+    }
     defer alloc.free(find_resp.payload);
 
-    std.debug.print("\n📥 ChainSync resp: mode(initiator?)={any} miniProto={d} len={d}\n", .{
-        find_resp.initiator_mode, find_resp.mini_proto, find_resp.payload_len
-    });
-    hexdump(find_resp.payload);
-
-    // Validate ChainSync response framing and tag before requesting next.
-    if (find_resp.mini_proto != 2 or find_resp.initiator_mode) return error.UnexpectedMuxFrame;
+    if (find_resp.initiator_mode) return error.UnexpectedMuxFrame;
     const find_tag = readChainSyncTag(find_resp.payload) orelse return error.InvalidChainSyncMessage;
-    if (find_tag == 6) {
+    if (find_tag == 5) {
         // MsgIntersectFound
         if (!validateIntersectFoundPoint(find_resp.payload)) return error.InvalidChainSyncMessage;
         var iter: usize = 0;
@@ -160,7 +219,7 @@ pub fn main() !void {
             if (req_resp.mini_proto != 2 or req_resp.initiator_mode) return error.UnexpectedMuxFrame;
             var req_tag = readChainSyncTag(req_resp.payload) orelse return error.InvalidChainSyncMessage;
             var pulsed = false;
-            while (req_tag == 5) {
+            while (req_tag == 1) {
                 // MsgAwaitReply: keep waiting for RollForward/RollBackward
                 if (pulse_mode and !await_noted) {
                     std.debug.print("⏳ Awaiting next block...\n", .{});
@@ -179,9 +238,9 @@ pub fn main() !void {
                     alloc.free(await_resp.payload);
                     return error.InvalidChainSyncMessage;
                 };
-                if (pulse_mode and (req_tag == 3 or req_tag == 4)) {
+                if (pulse_mode and (req_tag == 2 or req_tag == 3)) {
                     await_noted = false;
-                    if (req_tag == 3) {
+                    if (req_tag == 2) {
                         pulseRollForward(await_resp.payload, &last_roll_ms, &last_roll_slot);
                     } else {
                         pulseRollBackward(await_resp.payload, last_roll_slot);
@@ -190,15 +249,15 @@ pub fn main() !void {
                 }
                 alloc.free(await_resp.payload);
             }
-            if (req_tag != 3 and req_tag != 4) {
+            if (req_tag != 2 and req_tag != 3) {
                 std.debug.print("\n⚠️  Unexpected ChainSync tag after RequestNext: {d}\n", .{req_tag});
                 return error.InvalidChainSyncMessage;
             }
             if (pulse_mode and !pulsed) {
                 await_noted = false;
-                if (req_tag == 3) {
+                if (req_tag == 2) {
                     pulseRollForward(req_resp.payload, &last_roll_ms, &last_roll_slot);
-                } else if (req_tag == 4) {
+                } else if (req_tag == 3) {
                     pulseRollBackward(req_resp.payload, last_roll_slot);
                 }
             }
@@ -207,10 +266,8 @@ pub fn main() !void {
             std.debug.print("\n🛑 SIGINT received; stopping ChainSync loop\n", .{});
             return;
         }
-    } else if (find_tag == 7) {
-        // MsgIntersectNotFound
-        std.debug.print("\n⚠️  Intersect not found; skipping RequestNext\n", .{});
-        return;
+    } else if (find_tag == 6) {
+        return error.IntersectNotFound;
     } else {
         return error.InvalidChainSyncMessage;
     }
@@ -318,7 +375,13 @@ fn muxReadOneChainSync(alloc: std.mem.Allocator, stream: *std.net.Stream) !MuxMs
 fn read_exact(stream: *std.net.Stream, out: []u8) !void {
     var n: usize = 0;
     while (n < out.len) {
-        const got = try stream.reader().read(out[n..]);
+        if (g_stop.load(.seq_cst)) return error.Interrupted;
+        const got = stream.reader().read(out[n..]) catch |err| {
+            switch (err) {
+                error.WouldBlock => continue,
+                else => return err,
+            }
+        };
         if (got == 0) return error.ConnectionResetByPeer;
         n += got;
     }
@@ -437,7 +500,7 @@ fn validateIntersectFoundPoint(payload: []const u8) bool {
     if (top.major != 4 or top.val < 2) return false;
     idx += top.hdr_len;
     const tag_h = readCborHead(payload, idx) orelse return false;
-    if (tag_h.major != 0 or tag_h.val != 6) return false;
+    if (tag_h.major != 0 or tag_h.val != 5) return false;
     idx += tag_h.hdr_len;
 
     // Handle [6, point, tip] or [6, [point, tip]]
@@ -455,6 +518,31 @@ const PointInfo = struct {
     hash: [32]u8,
 };
 
+fn makeOriginPoint() PointInfo {
+    return .{ .slot = 0, .hash = [_]u8{0} ** 32 };
+}
+
+fn parseIntersectNotFoundTipPoint(payload: []const u8) ?PointInfo {
+    var idx: usize = 0;
+    const top = readCborHead(payload, idx) orelse return null;
+    if (top.major != 4 or top.val < 2) return null;
+    idx += top.hdr_len;
+    const tag_h = readCborHead(payload, idx) orelse return null;
+    if (tag_h.major != 0 or tag_h.val != 6) return null;
+    idx += tag_h.hdr_len;
+
+    if (parsePointAt(payload, idx)) |res| return res.point;
+    const tip_h = readCborHead(payload, idx) orelse return null;
+    if (tip_h.major != 4) return null;
+    idx += tip_h.hdr_len;
+    var n: u64 = 0;
+    while (n < tip_h.val) : (n += 1) {
+        if (parsePointAt(payload, idx)) |res| return res.point;
+        idx = skipCborItem(payload, idx) orelse return null;
+    }
+    return null;
+}
+
 fn parsePointAt(payload: []const u8, idx: usize) ?struct { next: usize, point: PointInfo } {
     const h = readCborHead(payload, idx) orelse return null;
     if (h.major != 4 or h.val != 2) return null;
@@ -471,6 +559,21 @@ fn parsePointAt(payload: []const u8, idx: usize) ?struct { next: usize, point: P
     @memcpy(hash[0..], payload[i .. i + 32]);
     i += 32;
     return .{ .next = i, .point = .{ .slot = slot, .hash = hash } };
+}
+
+fn buildChainSyncFindIntersectWithPoints(alloc: std.mem.Allocator, points: []const PointInfo) ![]u8 {
+    var a = std.ArrayList(u8).init(alloc);
+    errdefer a.deinit();
+    const w = a.writer();
+    try cbor.Cbor.writeArrayLen(w, 2);
+    try cbor.Cbor.writeUInt(w, 4);
+    try cbor.Cbor.writeArrayLen(w, points.len);
+    for (points) |p| {
+        try cbor.Cbor.writeArrayLen(w, 2);
+        try cbor.Cbor.writeUInt(w, p.slot);
+        try cbor.Cbor.writeBytes(w, &p.hash);
+    }
+    return a.toOwnedSlice();
 }
 
 fn skipCborItem(payload: []const u8, idx: usize) ?usize {
@@ -580,25 +683,6 @@ fn buildHandshakeProposeV14(alloc: std.mem.Allocator) ![]u8 {
     var a = std.ArrayList(u8).init(alloc);
     errdefer a.deinit();
     try a.appendSlice(&.{ 0x82, 0x00, 0xA1, 0x0E, 0x84, 0x02, 0xF4, 0x00, 0xF4 });
-    return a.toOwnedSlice();
-}
-
-fn buildChainSyncFindIntersectOrigin(alloc: std.mem.Allocator) ![]u8 {
-    // msgFindIntersect = [4, base.points] :contentReference[oaicite:9]{index=9}
-    // points = [[slot, hash]] with slot=0 and 32-byte header hash
-    var a = std.ArrayList(u8).init(alloc);
-    errdefer a.deinit();
-    try a.appendSlice(&.{
-        0x82, 0x04, // [4, ...]
-        0x81, // points list (len=1)
-        0x82, // point array (len=2)
-        0x00, // slot = 0
-        0x58, 0x20, // bytes (32)
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    }); // [4, [[0, h32]]]
     return a.toOwnedSlice();
 }
 
