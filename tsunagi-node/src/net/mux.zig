@@ -1,27 +1,22 @@
-const std = @import("std");
+const Transport = @import("transport/transport.zig").Transport;
 const Message = @import("protocol/message.zig").Message;
-const Queue = @import("runtime/queue.zig").Queue;
 
 pub const Mux = struct {
-    alloc: std.mem.Allocator,
-    inbox: Queue(Message),
+    transport: Transport,
 
-    pub fn init(alloc: std.mem.Allocator) Mux {
-        return .{
-            .alloc = alloc,
-            .inbox = Queue(Message).init(alloc),
-        };
+    pub fn init(transport: Transport) Mux {
+        return .{ .transport = transport };
     }
 
     pub fn deinit(self: *Mux) void {
-        self.inbox.deinit();
+        self.transport.deinit();
     }
 
     pub fn send(self: *Mux, msg: Message) !void {
-        try self.inbox.push(msg);
+        try self.transport.send(msg);
     }
 
-    pub fn recv(self: *Mux) ?Message {
-        return self.inbox.pop();
+    pub fn recv(self: *Mux) !?Message {
+        return try self.transport.recv();
     }
 };

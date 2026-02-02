@@ -6,6 +6,8 @@ const Message = @import("net/protocol/message.zig").Message;
 const ChainSync = @import("net/miniproto/chainsync.zig").ChainSync;
 const BlockFetch = @import("net/miniproto/blockfetch.zig").BlockFetch;
 
+const memory_transport = @import("net/transport/memory_transport.zig");
+
 fn printMsg(msg: Message) void {
     switch (msg) {
         .chainsync => |m| std.debug.print("[peer] chainsync: {s}\n", .{@tagName(m)}),
@@ -21,20 +23,20 @@ pub fn main() !void {
     const pm = PeerManager.init();
     _ = pm;
 
-    var mux = Mux.init(alloc);
+    const t = memory_transport.init(alloc);
+    var mux = Mux.init(t);
     defer mux.deinit();
 
     var cs = ChainSync.attach(&mux);
     var bf = BlockFetch.attach(&mux);
 
-    // Phase C.4: stateful scripted flow
     try cs.findIntersect();
     try cs.requestNext();
     try bf.requestRange();
 
-    std.debug.print("TSUNAGI Node fake peer loop start (Phase C.4)\n", .{});
-    while (mux.recv()) |msg| {
+    std.debug.print("TSUNAGI Node transport boundary start (Phase D.1)\n", .{});
+    while (try mux.recv()) |msg| {
         printMsg(msg);
     }
-    std.debug.print("TSUNAGI Node fake peer loop done (Phase C.4)\n", .{});
+    std.debug.print("TSUNAGI Node transport boundary done (Phase D.1)\n", .{});
 }
