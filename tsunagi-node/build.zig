@@ -12,7 +12,6 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe);
 
-    // ---- TSUNAGI: tests ----
     const test_step = b.step("test", "Run TSUNAGI Node tests");
 
     const protocol_tests = b.addTest(.{
@@ -20,14 +19,19 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const run_protocol = b.addRunArtifact(protocol_tests);
-    test_step.dependOn(&run_protocol.step);
+    test_step.dependOn(&b.addRunArtifact(protocol_tests).step);
 
     const byte_tests = b.addTest(.{
         .root_source_file = b.path("src/byte_transport_tests.zig"),
         .target = target,
         .optimize = optimize,
     });
-    const run_bytes = b.addRunArtifact(byte_tests);
-    test_step.dependOn(&run_bytes.step);
+    test_step.dependOn(&b.addRunArtifact(byte_tests).step);
+
+    const framing_tests = b.addTest(.{
+        .root_source_file = b.path("src/framing_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    test_step.dependOn(&b.addRunArtifact(framing_tests).step);
 }
