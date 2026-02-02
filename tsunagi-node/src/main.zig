@@ -7,12 +7,26 @@ const ChainSync = @import("net/miniproto/chainsync.zig").ChainSync;
 const BlockFetch = @import("net/miniproto/blockfetch.zig").BlockFetch;
 
 const memory_bt = @import("net/transport/memory_byte_transport.zig");
+const tcp_smoke = @import("net/transport/tcp_smoke.zig");
 
 fn printMsg(msg: Message) void {
     switch (msg) {
         .chainsync => |m| std.debug.print("[peer] chainsync: {s}\n", .{@tagName(m)}),
         .blockfetch => |m| std.debug.print("[peer] blockfetch: {s}\n", .{@tagName(m)}),
     }
+}
+
+fn usage() void {
+    std.debug.print(
+        \\TSUNAGI Node (Zig-only) — dev scaffolding
+        \\
+        \\Usage:
+        \\  zig build run
+        \\  zig build run -- tcp-smoke <host> <port>
+        \\
+        \\Default: runs in-memory framed mux demo.
+        \\
+    , .{});
 }
 
 pub fn main() !void {
@@ -23,6 +37,34 @@ pub fn main() !void {
     const pm = PeerManager.init();
     _ = pm;
 
+    var args_it = try std.process.argsWithAllocator(alloc);
+    defer args_it.deinit();
+
+    _ = args_it.next(); // argv[0]
+
+    if (args_it.next()) |cmd| {
+        if (std.mem.eql(u8, cmd, "tcp-smoke")) {
+            const host = args_it.next() orelse {
+                usage();
+                return error.InvalidArgs;
+            };
+            const port_s = args_it.next() orelse {
+                usage();
+                return error.InvalidArgs;
+            };
+            const port_u = std.fmt.parseUnsigned(u16, port_s, 10) catch {
+                usage();
+                return error.InvalidArgs;
+            };
+            try tcp_smoke.run(alloc, host, port_u);
+            return;
+        } else {
+            usage();
+            return error.InvalidArgs;
+        }
+    }
+
+    // Default: in-memory framed mux demo
     const bt = memory_bt.init(alloc, 256);
     var mux = Mux.init(alloc, bt);
     defer mux.deinit();

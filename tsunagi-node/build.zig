@@ -12,6 +12,13 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe);
 
+    // `zig build run -- [args...]`
+    const run_cmd = b.addRunArtifact(exe);
+    if (b.args) |args| run_cmd.addArgs(args);
+    const run_step = b.step("run", "Run TSUNAGI Node");
+    run_step.dependOn(&run_cmd.step);
+
+    // `zig build test` runs all test roots.
     const test_step = b.step("test", "Run TSUNAGI Node tests");
 
     const protocol_tests = b.addTest(.{
@@ -35,6 +42,10 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(framing_tests).step);
 
-    const mux_tests = b.addTest(.{ .root_source_file = b.path("src/mux_framing_tests.zig"), .target = target, .optimize = optimize });
-    test_step.dependOn(&b.addRunArtifact(mux_tests).step);
+    const mux_framing_tests = b.addTest(.{
+        .root_source_file = b.path("src/mux_framing_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    test_step.dependOn(&b.addRunArtifact(mux_framing_tests).step);
 }
