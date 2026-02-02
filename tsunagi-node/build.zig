@@ -12,14 +12,22 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe);
 
-    // ---- TSUNAGI: tests (Phase D.2) ----
-    const tests = b.addTest(.{
+    // ---- TSUNAGI: tests ----
+    const test_step = b.step("test", "Run TSUNAGI Node tests");
+
+    const protocol_tests = b.addTest(.{
         .root_source_file = b.path("src/protocol_tests.zig"),
         .target = target,
         .optimize = optimize,
     });
-    const run_tests = b.addRunArtifact(tests);
+    const run_protocol = b.addRunArtifact(protocol_tests);
+    test_step.dependOn(&run_protocol.step);
 
-    const test_step = b.step("test", "Run TSUNAGI Node tests");
-    test_step.dependOn(&run_tests.step);
+    const byte_tests = b.addTest(.{
+        .root_source_file = b.path("src/byte_transport_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const run_bytes = b.addRunArtifact(byte_tests);
+    test_step.dependOn(&run_bytes.step);
 }
