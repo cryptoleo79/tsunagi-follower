@@ -4,15 +4,15 @@ const Mux = @import("net/mux.zig").Mux;
 const ChainSync = @import("net/miniproto/chainsync.zig").ChainSync;
 const BlockFetch = @import("net/miniproto/blockfetch.zig").BlockFetch;
 
-const memory_transport = @import("net/transport/memory_transport.zig");
+const memory_transport = @import("net/transport/memory_byte_transport.zig");
 
 test "chainsync invalid order is rejected" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
-    const t = memory_transport.init(alloc);
-    var mux = Mux.init(t);
+    const t = memory_transport.init(alloc, 256);
+    var mux = Mux.init(alloc, t);
     defer mux.deinit();
 
     var cs = ChainSync.attach(&mux);
@@ -26,8 +26,8 @@ test "message ordering is FIFO across mux/transport" {
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
-    const t = memory_transport.init(alloc);
-    var mux = Mux.init(t);
+    const t = memory_transport.init(alloc, 256);
+    var mux = Mux.init(alloc, t);
     defer mux.deinit();
 
     var cs = ChainSync.attach(&mux);
