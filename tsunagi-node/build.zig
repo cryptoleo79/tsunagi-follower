@@ -34,4 +34,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     test_step.dependOn(&b.addRunArtifact(framing_tests).step);
+
+    const mux_tests = b.addTest(.{ .root_source_file = b.path("src/mux_framing_tests.zig"), .target = target, .optimize = optimize });
+    test_step.dependOn(&b.addRunArtifact(mux_tests).step);
 }
