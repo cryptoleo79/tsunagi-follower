@@ -1,6 +1,5 @@
 const Mux = @import("../mux.zig").Mux;
 const Message = @import("../protocol/message.zig").Message;
-const ChainSyncMsg = @import("../protocol/message.zig").ChainSyncMsg;
 
 pub const ChainSync = struct {
     mux: *Mux,
@@ -9,7 +8,11 @@ pub const ChainSync = struct {
         return .{ .mux = m };
     }
 
-    pub fn requestNext(self: *ChainSync) void {
-        self.mux.route(.{ .chainsync = .request_next });
+    pub fn findIntersect(self: *ChainSync) !void {
+        try self.mux.send(.{ .chainsync = .find_intersect });
+    }
+
+    pub fn requestNext(self: *ChainSync) !void {
+        try self.mux.send(.{ .chainsync = .request_next });
     }
 };

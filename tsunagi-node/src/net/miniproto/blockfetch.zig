@@ -1,6 +1,5 @@
 const Mux = @import("../mux.zig").Mux;
 const Message = @import("../protocol/message.zig").Message;
-const BlockFetchMsg = @import("../protocol/message.zig").BlockFetchMsg;
 
 pub const BlockFetch = struct {
     mux: *Mux,
@@ -9,7 +8,7 @@ pub const BlockFetch = struct {
         return .{ .mux = m };
     }
 
-    pub fn requestRange(self: *BlockFetch) void {
-        self.mux.route(.{ .blockfetch = .request_range });
+    pub fn requestRange(self: *BlockFetch) !void {
+        try self.mux.send(.{ .blockfetch = .request_range });
     }
 };
