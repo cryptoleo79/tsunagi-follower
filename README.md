@@ -21,6 +21,7 @@ Cardanoのpreviewネットワーク向けに作られた、最小構成の診断
 - `docs/TSUNAGI_NODE_M0.md`
 - `docs/TSUNAGI_NODE_ARCHITECTURE.md`
 - `ROADMAP.md`
+  - `tsunagi-node/` は将来のTSUNAGI NodeのためのZig-onlyスキャフォールドです。
 
 A minimal Cardano **node-to-node ChainSync** client that:
 - performs the node-to-node handshake (v14),
@@ -181,3 +182,5 @@ zig run src/main.zig -- preview-node.world.dev.cardano.org 30002
 
 This is a deliberately minimal follower used for protocol validation and diagnostics.
 It does **not** decode blocks or headers and does not persist chain state.
+
+- `tsunagi-node/` — Zig-only scaffold for the future TSUNAGI Node (no functionality yet)
