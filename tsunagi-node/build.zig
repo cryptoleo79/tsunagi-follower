@@ -48,4 +48,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     test_step.dependOn(&b.addRunArtifact(mux_framing_tests).step);
+
+    const handshake_codec_tests = b.addTest(.{
+        .root_source_file = b.path("src/handshake_codec_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    test_step.dependOn(&b.addRunArtifact(handshake_codec_tests).step);
 }

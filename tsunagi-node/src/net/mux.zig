@@ -43,8 +43,7 @@ pub const Mux = struct {
         }
 
         const res = framing.decode(self.recv_buf.items) catch |err| switch (err) {
-            framing.FrameError.IncompleteHeader,
-            framing.FrameError.IncompletePayload => return null,
+            framing.FrameError.IncompleteHeader, framing.FrameError.IncompletePayload => return null,
             else => return err,
         };
 

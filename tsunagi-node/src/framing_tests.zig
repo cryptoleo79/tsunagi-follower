@@ -17,13 +17,13 @@ test "encode/decode roundtrip" {
 }
 
 test "decode handles partial header" {
-    const buf = [_]u8{0x00, 0x00};
+    const buf = [_]u8{ 0x00, 0x00 };
     try std.testing.expectError(framing.FrameError.IncompleteHeader, framing.decode(&buf));
 }
 
 test "decode handles partial payload" {
     // length=5 but only 2 bytes payload
-    const buf = [_]u8{0,0,0,5,'h','i'};
+    const buf = [_]u8{ 0, 0, 0, 5, 'h', 'i' };
     try std.testing.expectError(framing.FrameError.IncompletePayload, framing.decode(&buf));
 }
 
