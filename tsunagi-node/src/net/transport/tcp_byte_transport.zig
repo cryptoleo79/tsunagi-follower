@@ -51,3 +51,17 @@ pub fn connect(alloc: std.mem.Allocator, host: []const u8, port: u16) !ByteTrans
     }
     return last_err;
 }
+
+pub fn setReadTimeout(bt: *ByteTransport, timeout_ms: u32) !void {
+    const impl: *TcpByteTransportImpl = @ptrCast(@alignCast(bt.ctx));
+    var tv = std.posix.timeval{
+        .tv_sec = @intCast(timeout_ms / 1000),
+        .tv_usec = @intCast((timeout_ms % 1000) * 1000),
+    };
+    try std.posix.setsockopt(
+        impl.stream.handle,
+        std.posix.SOL.SOCKET,
+        std.posix.SO.RCVTIMEO,
+        std.mem.asBytes(&tv),
+    );
+}
