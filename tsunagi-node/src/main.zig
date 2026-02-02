@@ -27,15 +27,14 @@ pub fn main() !void {
     var cs = ChainSync.attach(&mux);
     var bf = BlockFetch.attach(&mux);
 
-    // Phase C.3: enqueue a tiny scripted flow
+    // Phase C.4: stateful scripted flow
     try cs.findIntersect();
     try cs.requestNext();
     try bf.requestRange();
 
-    // Fake peer loop: drain queue deterministically
-    std.debug.print("TSUNAGI Node fake peer loop start (Phase C.3)\n", .{});
+    std.debug.print("TSUNAGI Node fake peer loop start (Phase C.4)\n", .{});
     while (mux.recv()) |msg| {
         printMsg(msg);
     }
-    std.debug.print("TSUNAGI Node fake peer loop done (Phase C.3)\n", .{});
+    std.debug.print("TSUNAGI Node fake peer loop done (Phase C.4)\n", .{});
 }
