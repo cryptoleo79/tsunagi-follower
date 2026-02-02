@@ -8,6 +8,7 @@ const BlockFetch = @import("net/miniproto/blockfetch.zig").BlockFetch;
 
 const memory_bt = @import("net/transport/memory_byte_transport.zig");
 const tcp_smoke = @import("net/transport/tcp_smoke.zig");
+const tcp_framed_mod = @import("net/transport/tcp_framed.zig");
 
 fn printMsg(msg: Message) void {
     switch (msg) {
@@ -57,6 +58,21 @@ pub fn main() !void {
                 return error.InvalidArgs;
             };
             try tcp_smoke.run(alloc, host, port_u);
+            return;
+        } else if (std.mem.eql(u8, cmd, "tcp-framed")) {
+            const host = args_it.next() orelse {
+                usage();
+                return error.InvalidArgs;
+            };
+            const port_s = args_it.next() orelse {
+                usage();
+                return error.InvalidArgs;
+            };
+            const port_u = std.fmt.parseUnsigned(u16, port_s, 10) catch {
+                usage();
+                return error.InvalidArgs;
+            };
+            try tcp_framed_mod.run(alloc, host, port_u);
             return;
         } else {
             usage();
