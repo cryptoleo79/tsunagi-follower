@@ -1,11 +1,15 @@
-const Handshake = @import("handshake.zig").Handshake;
+const Message = @import("protocol/message.zig").Message;
 
 pub const Mux = struct {
-    // TODO: mini-protocol multiplexing
-    _hs_attached: bool = false,
+    // TODO: real channel routing later
 
-    pub fn attachHandshake(h: *Handshake) Mux {
-        _ = h; // unused for now
-        return .{ ._hs_attached = true };
+    pub fn attachHandshake() Mux {
+        return .{};
+    }
+
+    pub fn route(self: *Mux, msg: Message) void {
+        _ = self;
+        _ = msg;
+        // Phase C.2: routing is a no-op
     }
 };
