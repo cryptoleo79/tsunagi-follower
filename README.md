@@ -19,6 +19,7 @@ Cardanoのpreviewネットワーク向けに作られた、最小構成の診断
 - `docs/TSUNAGI_MANIFESTO.md`
 - `docs/TSUNAGI_FOR_SPO.md`
 - `docs/TSUNAGI_NODE_M0.md`
+- `docs/TSUNAGI_NODE_ARCHITECTURE.md`
 - `ROADMAP.md`
 
 A minimal Cardano **node-to-node ChainSync** client that:
