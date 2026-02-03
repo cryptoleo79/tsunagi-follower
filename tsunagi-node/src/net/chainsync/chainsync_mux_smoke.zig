@@ -152,6 +152,22 @@ fn printBlockShallow(term: cbor.Term) void {
     }
 }
 
+fn printBlockHash(term: cbor.Term) void {
+    if (term == .array) {
+        const items = term.array;
+        if (items.len >= 2 and items[0] == .u64 and items[1] == .bytes) {
+            const era_id = items[0].u64;
+            const bytes = items[1].bytes;
+            var digest: [32]u8 = undefined;
+            std.crypto.hash.blake2.Blake2b256.hash(bytes, &digest, .{});
+            std.debug.print(
+                "block: era={d} bytes={d} blake2b256={s}\n",
+                .{ era_id, bytes.len, std.fmt.fmtSliceHexLower(&digest) },
+            );
+        }
+    }
+}
+
 fn printTipArray(items: []const cbor.Term) void {
     if (items.len == 2 and items[0] == .array and items[1] == .u64) {
         const inner = items[0].array;
@@ -353,6 +369,7 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
                                     .roll_forward => {
                                         std.debug.print("chainsync[{d}]: roll forward\n", .{i});
                                         printBlockShallow(next_msg.roll_forward.block);
+                                        printBlockHash(next_msg.roll_forward.block);
                                         printTip(next_msg.roll_forward.tip);
                                         try storeTip(alloc, &last_tip, next_msg.roll_forward.tip);
                                         awaiting_reply = false;
