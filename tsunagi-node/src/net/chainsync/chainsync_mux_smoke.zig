@@ -317,8 +317,37 @@ fn printTag24Inner(alloc: std.mem.Allocator, bytes: []const u8) bool {
     defer cbor.free(t1, alloc);
 
     printTermShallow(0, t0);
-    printHeaderShallow(t0);
+    printHeaderShallow(alloc, t0);
     printTermShallow(1, t1);
+    if (t1 == .bytes) {
+        const inner1 = t1.bytes;
+        if (inner1.len > 0) {
+            const major: u8 = inner1[0] >> 5;
+            const kind = switch (major) {
+                0 => "uint",
+                1 => "negint",
+                2 => "bytes",
+                3 => "text",
+                4 => "array",
+                5 => "map",
+                6 => "tag",
+                else => "simple",
+            };
+            std.debug.print("inner1 cbor top: {s}\n", .{kind});
+        } else {
+            std.debug.print("inner1 cbor top: (empty)\n", .{});
+        }
+
+        var inner1_fbs = std.io.fixedBufferStream(inner1);
+        const inner1_term = cbor.decode(alloc, inner1_fbs.reader()) catch {
+            std.debug.print("inner1 decode: failed\n", .{});
+            std.debug.print("inner1 scan:\n", .{});
+            scanCborShallow(inner1);
+            return true;
+        };
+        defer cbor.free(inner1_term, alloc);
+        printInner1Term(inner1_term);
+    }
     return true;
 }
 
@@ -340,6 +369,225 @@ fn printTermShallow(index: usize, term: cbor.Term) void {
     }
 }
 
+fn printInner1Term(term: cbor.Term) void {
+    switch (term) {
+        .u64 => |v| std.debug.print("inner1 term: u64 {d}\n", .{v}),
+        .i64 => |v| std.debug.print("inner1 term: i64 {d}\n", .{v}),
+        .bool => |v| std.debug.print("inner1 term: bool {s}\n", .{if (v) "true" else "false"}),
+        .text => |v| std.debug.print("inner1 term: text len={d}\n", .{v.len}),
+        .bytes => |b| {
+            const end = if (b.len < 8) b.len else 8;
+            std.debug.print(
+                "inner1 term: bytes len={d} prefix={s}\n",
+                .{ b.len, std.fmt.fmtSliceHexLower(b[0..end]) },
+            );
+        },
+        .array => |items| {
+            std.debug.print("inner1 term: array len={d}\n", .{items.len});
+            const max_items = if (items.len < 3) items.len else 3;
+            var i: usize = 0;
+            while (i < max_items) : (i += 1) {
+                const item = items[i];
+                switch (item) {
+                    .u64 => |v| std.debug.print("inner1[{d}]: u64 {d}\n", .{ i, v }),
+                    .i64 => |v| std.debug.print("inner1[{d}]: i64 {d}\n", .{ i, v }),
+                    .bool => |v| std.debug.print("inner1[{d}]: bool {s}\n", .{ i, if (v) "true" else "false" }),
+                    .text => |v| std.debug.print("inner1[{d}]: text len={d}\n", .{ i, v.len }),
+                    .bytes => |b| {
+                        const end = if (b.len < 8) b.len else 8;
+                        std.debug.print(
+                            "inner1[{d}]: bytes len={d} prefix={s}\n",
+                            .{ i, b.len, std.fmt.fmtSliceHexLower(b[0..end]) },
+                        );
+                    },
+                    .array => |arr| std.debug.print("inner1[{d}]: array len={d}\n", .{ i, arr.len }),
+                    .map_u64 => |map| std.debug.print("inner1[{d}]: map len={d}\n", .{ i, map.len }),
+                }
+            }
+        },
+        .map_u64 => |entries| {
+            std.debug.print("inner1 term: map len={d}\n", .{entries.len});
+            const max_entries = if (entries.len < 3) entries.len else 3;
+            var i: usize = 0;
+            while (i < max_entries) : (i += 1) {
+                const entry = entries[i];
+                const value = entry.value;
+                switch (value) {
+                    .u64 => |v| std.debug.print("inner1[{d}]: key={d} u64 {d}\n", .{ i, entry.key, v }),
+                    .i64 => |v| std.debug.print("inner1[{d}]: key={d} i64 {d}\n", .{ i, entry.key, v }),
+                    .bool => |v| std.debug.print("inner1[{d}]: key={d} bool {s}\n", .{ i, entry.key, if (v) "true" else "false" }),
+                    .text => |v| std.debug.print("inner1[{d}]: key={d} text len={d}\n", .{ i, entry.key, v.len }),
+                    .bytes => |b| {
+                        const end = if (b.len < 8) b.len else 8;
+                        std.debug.print(
+                            "inner1[{d}]: key={d} bytes len={d} prefix={s}\n",
+                            .{ i, entry.key, b.len, std.fmt.fmtSliceHexLower(b[0..end]) },
+                        );
+                    },
+                    .array => |arr| std.debug.print("inner1[{d}]: key={d} array len={d}\n", .{ i, entry.key, arr.len }),
+                    .map_u64 => |map| std.debug.print("inner1[{d}]: key={d} map len={d}\n", .{ i, entry.key, map.len }),
+                }
+            }
+        },
+    }
+}
+
+fn majorName(major: u8) []const u8 {
+    return switch (major) {
+        0 => "uint",
+        1 => "negint",
+        2 => "bytes",
+        3 => "text",
+        4 => "array",
+        5 => "map",
+        6 => "tag",
+        else => "simple",
+    };
+}
+
+fn readAiValue(bytes: []const u8, index: *usize) ?usize {
+    if (index.* >= bytes.len) return null;
+    const head = bytes[index.*];
+    const ai: u8 = head & 0x1f;
+    index.* += 1;
+    switch (ai) {
+        0...23 => return ai,
+        24 => {
+            if (index.* + 1 > bytes.len) return null;
+            const v = bytes[index.*];
+            index.* += 1;
+            return v;
+        },
+        25 => {
+            if (index.* + 2 > bytes.len) return null;
+            const v = (@as(usize, bytes[index.*]) << 8) | bytes[index.* + 1];
+            index.* += 2;
+            return v;
+        },
+        26 => {
+            if (index.* + 4 > bytes.len) return null;
+            const v = (@as(usize, bytes[index.*]) << 24) |
+                (@as(usize, bytes[index.* + 1]) << 16) |
+                (@as(usize, bytes[index.* + 2]) << 8) |
+                bytes[index.* + 3];
+            index.* += 4;
+            return v;
+        },
+        31 => return null,
+        else => return null,
+    }
+}
+
+fn scanItem(bytes: []const u8, index: *usize, label: []const u8) bool {
+    if (index.* >= bytes.len) return false;
+    const head = bytes[index.*];
+    const major: u8 = head >> 5;
+    const ai: u8 = head & 0x1f;
+    if (ai == 31) {
+        std.debug.print("{s}: {s} indefinite (not supported)\n", .{ label, majorName(major) });
+        return false;
+    }
+    const start = index.*;
+    const len_or_val = readAiValue(bytes, index) orelse return false;
+
+    switch (major) {
+        0 => std.debug.print("{s}: uint {d}\n", .{ label, len_or_val }),
+        1 => std.debug.print("{s}: negint {d}\n", .{ label, len_or_val }),
+        2, 3 => {
+            const kind = if (major == 2) "bytes" else "text";
+            if (index.* + len_or_val > bytes.len) return false;
+            const end = if (len_or_val < 8) len_or_val else 8;
+            std.debug.print(
+                "{s}: {s} len={d} prefix={s}\n",
+                .{ label, kind, len_or_val, std.fmt.fmtSliceHexLower(bytes[index.* .. index.* + end]) },
+            );
+            index.* += len_or_val;
+        },
+        4 => std.debug.print("{s}: array len={d}\n", .{ label, len_or_val }),
+        5 => std.debug.print("{s}: map pairs={d}\n", .{ label, len_or_val }),
+        6 => std.debug.print("{s}: tag {d}\n", .{ label, len_or_val }),
+        else => std.debug.print("{s}: simple ai={d}\n", .{ label, ai }),
+    }
+
+    _ = start;
+    return true;
+}
+
+fn scanCborShallow(bytes: []const u8) void {
+    var index: usize = 0;
+    if (bytes.len == 0) {
+        std.debug.print("inner1 scan: empty\n", .{});
+        return;
+    }
+
+    if (index >= bytes.len) return;
+    const head = bytes[index];
+    const major: u8 = head >> 5;
+    const ai: u8 = head & 0x1f;
+    if (ai == 31) {
+        std.debug.print("inner1 scan: {s} indefinite (not supported)\n", .{majorName(major)});
+        return;
+    }
+    const len_or_val = readAiValue(bytes, &index) orelse {
+        std.debug.print("inner1 scan: failed\n", .{});
+        return;
+    };
+
+    if (major == 6) {
+        std.debug.print("inner1 scan: tag {d}\n", .{len_or_val});
+        if (index >= bytes.len) return;
+        const sub_head = bytes[index];
+        const sub_major: u8 = sub_head >> 5;
+        const sub_ai: u8 = sub_head & 0x1f;
+        if (sub_ai == 31) {
+            std.debug.print("inner1 scan: {s} indefinite (not supported)\n", .{majorName(sub_major)});
+            return;
+        }
+        const sub_len = readAiValue(bytes, &index) orelse return;
+        std.debug.print("inner1 scan: {s}\n", .{majorName(sub_major)});
+        if (sub_major == 2 or sub_major == 3) {
+            if (index + sub_len > bytes.len) return;
+            index += sub_len;
+        }
+        if (sub_major != 4 and sub_major != 5) return;
+        const pairs = sub_len;
+        if (sub_major == 4) {
+            const max_items = if (pairs < 3) pairs else 3;
+            var i: usize = 0;
+            while (i < max_items) : (i += 1) {
+                if (!scanItem(bytes, &index, "inner1 scan item")) return;
+            }
+            return;
+        }
+        const max_pairs = if (pairs < 3) pairs else 3;
+        var i: usize = 0;
+        while (i < max_pairs) : (i += 1) {
+            if (!scanItem(bytes, &index, "inner1 scan key")) return;
+            if (!scanItem(bytes, &index, "inner1 scan val")) return;
+        }
+        return;
+    }
+
+    std.debug.print("inner1 scan: {s}\n", .{majorName(major)});
+    if (major == 4) {
+        const max_items = if (len_or_val < 3) len_or_val else 3;
+        var i: usize = 0;
+        while (i < max_items) : (i += 1) {
+            if (!scanItem(bytes, &index, "inner1 scan item")) return;
+        }
+        return;
+    }
+    if (major == 5) {
+        const max_pairs = if (len_or_val < 3) len_or_val else 3;
+        var i: usize = 0;
+        while (i < max_pairs) : (i += 1) {
+            if (!scanItem(bytes, &index, "inner1 scan key")) return;
+            if (!scanItem(bytes, &index, "inner1 scan val")) return;
+        }
+        return;
+    }
+}
+
 fn printHeaderItem(index: usize, term: cbor.Term) void {
     switch (term) {
         .u64 => |v| std.debug.print("header[{d}]: u64 {d}\n", .{ index, v }),
@@ -358,14 +606,98 @@ fn printHeaderItem(index: usize, term: cbor.Term) void {
     }
 }
 
-fn printHeaderShallow(term: cbor.Term) void {
+fn printHeaderItemNested(parent: usize, index: usize, term: cbor.Term) void {
+    switch (term) {
+        .u64 => |v| std.debug.print("header[{d}][{d}]: u64 {d}\n", .{ parent, index, v }),
+        .i64 => |v| std.debug.print("header[{d}][{d}]: i64 {d}\n", .{ parent, index, v }),
+        .bool => |v| std.debug.print("header[{d}][{d}]: bool {s}\n", .{ parent, index, if (v) "true" else "false" }),
+        .text => |v| std.debug.print("header[{d}][{d}]: text len={d}\n", .{ parent, index, v.len }),
+        .bytes => |b| {
+            const end = if (b.len < 8) b.len else 8;
+            std.debug.print(
+                "header[{d}][{d}]: bytes len={d} prefix={s}\n",
+                .{ parent, index, b.len, std.fmt.fmtSliceHexLower(b[0..end]) },
+            );
+        },
+        .array => |items| std.debug.print("header[{d}][{d}]: array len={d}\n", .{ parent, index, items.len }),
+        .map_u64 => |entries| std.debug.print("header[{d}][{d}]: map len={d}\n", .{ parent, index, entries.len }),
+    }
+}
+
+fn printHeaderShallow(alloc: std.mem.Allocator, term: cbor.Term) void {
     if (term != .array) return;
     const items = term.array;
     if (items.len != 15) return;
-    const max_items = if (items.len < 6) items.len else 6;
     var i: usize = 0;
-    while (i < max_items) : (i += 1) {
+    while (i < items.len and i < 15) : (i += 1) {
         printHeaderItem(i, items[i]);
+    }
+
+    var list = std.ArrayList(u8).init(alloc);
+    defer list.deinit();
+    cbor.encode(term, list.writer()) catch return;
+    const bytes = list.items;
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.blake2.Blake2b256.hash(bytes, &digest, .{});
+    std.debug.print(
+        "header: cbor_bytes={d} blake2b256={s}\n",
+        .{ bytes.len, std.fmt.fmtSliceHexLower(&digest) },
+    );
+
+    if (items.len >= 6 and items[5] == .array) {
+        const header5 = items[5].array;
+        if (header5.len == 2) {
+            printHeaderItemNested(5, 0, header5[0]);
+            printHeaderItemNested(5, 1, header5[1]);
+            if (header5[0] == .u64 and header5[1] == .bytes) {
+                const slot = header5[0].u64;
+                const hash = header5[1].bytes;
+                const end = if (hash.len < 8) hash.len else 8;
+                std.debug.print(
+                    "header point candidate: slot={d} hash={s}\n",
+                    .{ slot, std.fmt.fmtSliceHexLower(hash[0..end]) },
+                );
+            }
+        }
+    }
+
+    if (items.len >= 7 and items[6] == .array) {
+        const header6 = items[6].array;
+        if (header6.len == 2) {
+            printHeaderItemNested(6, 0, header6[0]);
+            printHeaderItemNested(6, 1, header6[1]);
+            if (header6[0] == .u64 and header6[1] == .bytes and header6[1].bytes.len == 32) {
+                const slot = header6[0].u64;
+                const hash = header6[1].bytes;
+                const end = if (hash.len < 8) hash.len else 8;
+                std.debug.print(
+                    "header[6] point candidate: slot={d} hash={s}\n",
+                    .{ slot, std.fmt.fmtSliceHexLower(hash[0..end]) },
+                );
+            } else if ((header6[0] == .array and header6[0].array.len == 2 and header6[1] == .u64) or
+                (header6[0] == .u64 and header6[1] == .array and header6[1].array.len == 2))
+            {
+                std.debug.print("header[6] looks nested\n", .{});
+            }
+        }
+    }
+
+    i = 6;
+    while (i < items.len and i < 15) : (i += 1) {
+        if (items[i] == .array) {
+            const entry = items[i].array;
+            if (entry.len == 2 and entry[0] == .u64 and entry[1] == .bytes) {
+                const slot = entry[0].u64;
+                const hash = entry[1].bytes;
+                if (hash.len == 32) {
+                    const end = if (hash.len < 8) hash.len else 8;
+                    std.debug.print(
+                        "header point candidate at [{d}]: slot={d} hash={s}\n",
+                        .{ i, slot, std.fmt.fmtSliceHexLower(hash[0..end]) },
+                    );
+                }
+            }
+        }
     }
 }
 
