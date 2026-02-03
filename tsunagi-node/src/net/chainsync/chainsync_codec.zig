@@ -11,18 +11,37 @@ pub const FindIntersect = struct {
     points: cbor.Term,
 };
 
+pub const RequestNext = struct {};
+
+pub const AwaitReply = struct {};
+
 pub const IntersectFound = struct {
-    payload: cbor.Term,
+    point: cbor.Term,
+    tip: cbor.Term,
 };
 
 pub const IntersectNotFound = struct {
-    payload: cbor.Term,
+    tip: cbor.Term,
+};
+
+pub const RollForward = struct {
+    block: cbor.Term,
+    tip: cbor.Term,
+};
+
+pub const RollBackward = struct {
+    point: cbor.Term,
+    tip: cbor.Term,
 };
 
 pub const Msg = union(enum) {
     find_intersect: FindIntersect,
+    request_next: RequestNext,
+    await_reply: AwaitReply,
     intersect_found: IntersectFound,
     intersect_not_found: IntersectNotFound,
+    roll_forward: RollForward,
+    roll_backward: RollBackward,
 };
 
 pub fn encodeFindIntersect(writer: anytype, points: cbor.Term) anyerror!void {
@@ -36,25 +55,49 @@ pub fn encodeFindIntersect(writer: anytype, points: cbor.Term) anyerror!void {
     try cbor.encode(term, writer);
 }
 
+pub fn encodeRequestNext(writer: anytype) anyerror!void {
+    var items: [1]cbor.Term = undefined;
+    items[0] = .{ .u64 = 0 };
+    const term = cbor.Term{ .array = items[0..1] };
+    try cbor.encode(term, writer);
+}
+
 pub fn decodeResponse(alloc: std.mem.Allocator, reader: anytype) anyerror!Msg {
     const term = try cbor.decode(alloc, reader);
     defer cbor.free(term, alloc);
 
     if (term != .array) return error.InvalidType;
     const items = term.array;
-    if (items.len < 1) return error.InvalidLength;
+    if (items.len == 0) return error.InvalidLength;
     if (items[0] != .u64) return error.InvalidType;
 
     return switch (items[0].u64) {
+        1 => blk: {
+            if (items.len != 1) return error.InvalidLength;
+            break :blk Msg{ .await_reply = .{} };
+        },
+        2 => blk: {
+            if (items.len != 3) return error.InvalidLength;
+            const block = try cloneTerm(alloc, items[1]);
+            const tip = try cloneTerm(alloc, items[2]);
+            break :blk Msg{ .roll_forward = .{ .block = block, .tip = tip } };
+        },
+        3 => blk: {
+            if (items.len != 3) return error.InvalidLength;
+            const point = try cloneTerm(alloc, items[1]);
+            const tip = try cloneTerm(alloc, items[2]);
+            break :blk Msg{ .roll_backward = .{ .point = point, .tip = tip } };
+        },
         5 => blk: {
-            if (items.len < 2) return error.InvalidLength;
-            const payload = try cloneTerm(alloc, items[1]);
-            break :blk Msg{ .intersect_found = .{ .payload = payload } };
+            if (items.len != 3) return error.InvalidLength;
+            const point = try cloneTerm(alloc, items[1]);
+            const tip = try cloneTerm(alloc, items[2]);
+            break :blk Msg{ .intersect_found = .{ .point = point, .tip = tip } };
         },
         6 => blk: {
-            if (items.len < 2) return error.InvalidLength;
-            const payload = try cloneTerm(alloc, items[1]);
-            break :blk Msg{ .intersect_not_found = .{ .payload = payload } };
+            if (items.len != 2) return error.InvalidLength;
+            const tip = try cloneTerm(alloc, items[1]);
+            break :blk Msg{ .intersect_not_found = .{ .tip = tip } };
         },
         else => error.InvalidTag,
     };
@@ -63,8 +106,21 @@ pub fn decodeResponse(alloc: std.mem.Allocator, reader: anytype) anyerror!Msg {
 pub fn free(alloc: std.mem.Allocator, msg: *Msg) void {
     switch (msg.*) {
         .find_intersect => |*m| cbor.free(m.points, alloc),
-        .intersect_found => |*m| cbor.free(m.payload, alloc),
-        .intersect_not_found => |*m| cbor.free(m.payload, alloc),
+        .request_next => {},
+        .await_reply => {},
+        .intersect_found => |*m| {
+            cbor.free(m.point, alloc);
+            cbor.free(m.tip, alloc);
+        },
+        .intersect_not_found => |*m| cbor.free(m.tip, alloc),
+        .roll_forward => |*m| {
+            cbor.free(m.block, alloc);
+            cbor.free(m.tip, alloc);
+        },
+        .roll_backward => |*m| {
+            cbor.free(m.point, alloc);
+            cbor.free(m.tip, alloc);
+        },
     }
 }
 

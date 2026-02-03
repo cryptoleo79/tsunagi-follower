@@ -104,8 +104,68 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
             defer chainsync_codec.free(alloc, &msg);
 
             switch (msg) {
-                .intersect_found => std.debug.print("chainsync: intersect found\n", .{}),
-                .intersect_not_found => std.debug.print("chainsync: intersect not found\n", .{}),
+                .intersect_found => {
+                    std.debug.print("chainsync: intersect found\n", .{});
+
+                    var req_list = std.ArrayList(u8).init(alloc);
+                    defer req_list.deinit();
+                    try chainsync_codec.encodeRequestNext(req_list.writer());
+                    const req_bytes = try req_list.toOwnedSlice();
+                    defer alloc.free(req_bytes);
+
+                    try mux_bearer.sendSegment(&bt, .responder, chainsync_proto, req_bytes);
+
+                    const req_deadline_ms: i64 = std.time.milliTimestamp() + timeout_ms;
+                    while (true) {
+                        const req_now_ms = std.time.milliTimestamp();
+                        if (req_now_ms >= req_deadline_ms) {
+                            std.debug.print("chainsync: timed out after 10000ms\n", .{});
+                            return;
+                        }
+
+                        const req_remaining_ms: u32 = @intCast(req_deadline_ms - req_now_ms);
+                        tcp_bt.setReadTimeout(&bt, req_remaining_ms) catch {};
+
+                        const next_seg = mux_bearer.recvSegmentWithTimeout(alloc, &bt) catch |err| switch (err) {
+                            error.TimedOut => continue,
+                            else => return err,
+                        };
+                        if (next_seg == null) {
+                            std.debug.print("peer closed\n", .{});
+                            return;
+                        }
+                        defer alloc.free(next_seg.?.payload);
+
+                        const next_hdr = next_seg.?.hdr;
+                        std.debug.print(
+                            "mux: rx hdr dir={s} proto={d} len={d}\n",
+                            .{ @tagName(next_hdr.dir), next_hdr.proto, next_hdr.len },
+                        );
+
+                        if (next_hdr.proto == chainsync_proto) {
+                            var next_fbs = std.io.fixedBufferStream(next_seg.?.payload);
+                            var next_msg = try chainsync_codec.decodeResponse(alloc, next_fbs.reader());
+                            defer chainsync_codec.free(alloc, &next_msg);
+
+                            switch (next_msg) {
+                                .roll_forward => std.debug.print("chainsync: roll forward\n", .{}),
+                                .roll_backward => std.debug.print("chainsync: roll backward\n", .{}),
+                                else => std.debug.print("chainsync: no response\n", .{}),
+                            }
+                            return;
+                        } else if (next_hdr.proto == 8) {
+                            std.debug.print("keepalive: rx (ignored)\n", .{});
+                            continue;
+                        } else {
+                            std.debug.print("mux: rx unexpected proto={d}\n", .{next_hdr.proto});
+                            continue;
+                        }
+                    }
+                },
+                .intersect_not_found => {
+                    std.debug.print("chainsync: intersect not found\n", .{});
+                    return;
+                },
                 else => std.debug.print("chainsync: no response\n", .{}),
             }
             return;
