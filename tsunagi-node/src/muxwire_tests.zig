@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const memory_bt = @import("net/transport/memory_byte_transport.zig");
+const mux_bearer = @import("net/muxwire/mux_bearer.zig");
 const mux_header = @import("net/muxwire/mux_header.zig");
 
 const Header = mux_header.Header;
@@ -52,4 +54,27 @@ test "mux header encode rejects out of range proto" {
             .len = 1,
         }, &out),
     );
+}
+
+test "mux bearer roundtrip send/recv" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const alloc = gpa.allocator();
+
+    var bt = memory_bt.init(alloc, 64);
+    defer bt.deinit();
+
+    const payload = "hello";
+    try mux_bearer.sendSegment(&bt, .initiator, 14, payload);
+
+    const res = try mux_bearer.recvSegment(alloc, &bt);
+    try std.testing.expect(res != null);
+    const seg = res.?;
+    defer alloc.free(seg.payload);
+
+    try std.testing.expectEqual(@as(u32, 0), seg.hdr.tx_time);
+    try std.testing.expectEqual(mux_header.MiniProtocolDir.initiator, seg.hdr.dir);
+    try std.testing.expectEqual(@as(u16, 14), seg.hdr.proto);
+    try std.testing.expectEqual(@as(u16, payload.len), seg.hdr.len);
+    try std.testing.expectEqualSlices(u8, payload, seg.payload);
 }
