@@ -180,7 +180,14 @@ fn printBlockHash(alloc: std.mem.Allocator, term: cbor.Term) void {
             const bytes = blk: {
                 if (items[1] == .bytes) break :blk items[1].bytes;
                 if (items[1] == .tag and items[1].tag.tag == 24 and items[1].tag.value.* == .bytes) {
-                    break :blk items[1].tag.value.*.bytes;
+                    const tag_bytes = items[1].tag.value.*.bytes;
+                    var tag_digest: [32]u8 = undefined;
+                    std.crypto.hash.blake2.Blake2b256.hash(tag_bytes, &tag_digest, .{});
+                    std.debug.print(
+                        "block_tag24_hash={s} bytes={d}\n",
+                        .{ std.fmt.fmtSliceHexLower(&tag_digest), tag_bytes.len },
+                    );
+                    break :blk tag_bytes;
                 }
                 return;
             };
@@ -675,8 +682,8 @@ fn printHeaderShallow(alloc: std.mem.Allocator, term: cbor.Term) void {
     var digest: [32]u8 = undefined;
     std.crypto.hash.blake2.Blake2b256.hash(bytes, &digest, .{});
     std.debug.print(
-        "header: cbor_bytes={d} blake2b256={s}\n",
-        .{ bytes.len, std.fmt.fmtSliceHexLower(&digest) },
+        "block_inner_hash={s} bytes={d}\n",
+        .{ std.fmt.fmtSliceHexLower(&digest), bytes.len },
     );
 
     if (items.len >= 6 and items[5] == .array) {
