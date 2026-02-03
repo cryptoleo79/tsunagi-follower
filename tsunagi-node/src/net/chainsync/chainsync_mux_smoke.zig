@@ -30,6 +30,45 @@ fn printPoint(term: cbor.Term) void {
     std.debug.print("point: (opaque)\n", .{});
 }
 
+fn cloneTerm(alloc: std.mem.Allocator, term: cbor.Term) !cbor.Term {
+    return switch (term) {
+        .u64 => |v| cbor.Term{ .u64 = v },
+        .i64 => |v| cbor.Term{ .i64 = v },
+        .bool => |v| cbor.Term{ .bool = v },
+        .bytes => |b| cbor.Term{ .bytes = try alloc.dupe(u8, b) },
+        .text => |t| cbor.Term{ .text = try alloc.dupe(u8, t) },
+        .array => |items| blk: {
+            var out = try alloc.alloc(cbor.Term, items.len);
+            errdefer {
+                for (out) |item| cbor.free(item, alloc);
+                alloc.free(out);
+            }
+            for (items, 0..) |item, i| {
+                out[i] = try cloneTerm(alloc, item);
+            }
+            break :blk cbor.Term{ .array = out };
+        },
+        .map_u64 => |entries| blk: {
+            var out = try alloc.alloc(cbor.MapEntry, entries.len);
+            errdefer {
+                for (out) |e| cbor.free(e.value, alloc);
+                alloc.free(out);
+            }
+            for (entries, 0..) |e, i| {
+                out[i] = .{ .key = e.key, .value = try cloneTerm(alloc, e.value) };
+            }
+            break :blk cbor.Term{ .map_u64 = out };
+        },
+    };
+}
+
+fn storeTip(alloc: std.mem.Allocator, last_tip: *?cbor.Term, tip: cbor.Term) !void {
+    if (last_tip.*) |existing| {
+        cbor.free(existing, alloc);
+    }
+    last_tip.* = try cloneTerm(alloc, tip);
+}
+
 fn printIndent(level: usize) void {
     var i: usize = 0;
     while (i < level) : (i += 1) {
@@ -91,7 +130,7 @@ fn printTipArray(items: []const cbor.Term) void {
             const block_no = items[1].u64;
             const end = if (hash.len < 8) hash.len else 8;
             std.debug.print(
-                "tip: slot={d} blockNo={d} hash={s}\n",
+                "tip(from msg): slot={d} blockNo={d} hash={s}\n",
                 .{ slot, block_no, std.fmt.fmtSliceHexLower(hash[0..end]) },
             );
             return;
@@ -100,15 +139,15 @@ fn printTipArray(items: []const cbor.Term) void {
     if (items.len >= 1 and items[0] == .u64) {
         if (items.len >= 3 and items[2] == .u64) {
             std.debug.print(
-                "tip: slot={d} blockNo={d}\n",
+                "tip(from msg): slot={d} blockNo={d}\n",
                 .{ items[0].u64, items[2].u64 },
             );
             return;
         }
-        std.debug.print("tip: slot={d}\n", .{items[0].u64});
+        std.debug.print("tip(from msg): slot={d}\n", .{items[0].u64});
         return;
     }
-    std.debug.print("tip: (opaque)\n", .{});
+    std.debug.print("tip(from msg): (opaque)\n", .{});
     std.debug.print("tip term:\n", .{});
     printTerm(.{ .array = @constCast(items) }, 1);
 }
@@ -123,7 +162,7 @@ fn printTip(term: cbor.Term) void {
         printTipArray(items);
         return;
     }
-    std.debug.print("tip: (opaque)\n", .{});
+    std.debug.print("tip(from msg): (opaque)\n", .{});
     std.debug.print("tip term:\n", .{});
     printTerm(term, 1);
 }
@@ -165,6 +204,10 @@ fn doHandshake(alloc: std.mem.Allocator, bt: *bt_boundary.ByteTransport) !bool {
 pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
     var bt = try tcp_bt.connect(alloc, host, port);
     defer bt.deinit();
+    var last_tip: ?cbor.Term = null;
+    defer if (last_tip) |tip| {
+        cbor.free(tip, alloc);
+    };
 
     const timeout_ms: u32 = 10_000;
     tcp_bt.setReadTimeout(&bt, timeout_ms) catch {};
@@ -226,6 +269,7 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
                 .intersect_found => {
                     std.debug.print("chainsync: intersect found\n", .{});
                     printTip(msg.intersect_found.tip);
+                    try storeTip(alloc, &last_tip, msg.intersect_found.tip);
 
                     var req_list = std.ArrayList(u8).init(alloc);
                     defer req_list.deinit();
@@ -278,12 +322,14 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
                                     .roll_forward => {
                                         std.debug.print("chainsync[{d}]: roll forward\n", .{i});
                                         printTip(next_msg.roll_forward.tip);
+                                        try storeTip(alloc, &last_tip, next_msg.roll_forward.tip);
                                         awaiting_reply = false;
                                     },
                                     .roll_backward => {
                                         std.debug.print("chainsync[{d}]: roll backward\n", .{i});
                                         printPoint(next_msg.roll_backward.point);
                                         printTip(next_msg.roll_backward.tip);
+                                        try storeTip(alloc, &last_tip, next_msg.roll_backward.tip);
                                         awaiting_reply = false;
                                     },
                                     else => {
