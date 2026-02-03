@@ -129,6 +129,7 @@ fn cloneTerm(alloc: std.mem.Allocator, term: cbor.Term) !cbor.Term {
         .u64 => |v| cbor.Term{ .u64 = v },
         .i64 => |v| cbor.Term{ .i64 = v },
         .bool => |v| cbor.Term{ .bool = v },
+        .null => cbor.Term{ .null = {} },
         .bytes => |b| cbor.Term{ .bytes = try alloc.dupe(u8, b) },
         .text => |t| cbor.Term{ .text = try alloc.dupe(u8, t) },
         .array => |items| blk: {
@@ -152,6 +153,12 @@ fn cloneTerm(alloc: std.mem.Allocator, term: cbor.Term) !cbor.Term {
                 out[i] = .{ .key = e.key, .value = try cloneTerm(alloc, e.value) };
             }
             break :blk cbor.Term{ .map_u64 = out };
+        },
+        .tag => |t| blk: {
+            const value = try alloc.create(cbor.Term);
+            errdefer alloc.destroy(value);
+            value.* = try cloneTerm(alloc, t.value.*);
+            break :blk cbor.Term{ .tag = .{ .tag = t.tag, .value = value } };
         },
     };
 }

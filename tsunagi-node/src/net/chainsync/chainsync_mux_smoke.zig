@@ -35,6 +35,7 @@ fn cloneTerm(alloc: std.mem.Allocator, term: cbor.Term) !cbor.Term {
         .u64 => |v| cbor.Term{ .u64 = v },
         .i64 => |v| cbor.Term{ .i64 = v },
         .bool => |v| cbor.Term{ .bool = v },
+        .null => cbor.Term{ .null = {} },
         .bytes => |b| cbor.Term{ .bytes = try alloc.dupe(u8, b) },
         .text => |t| cbor.Term{ .text = try alloc.dupe(u8, t) },
         .array => |items| blk: {
@@ -58,6 +59,12 @@ fn cloneTerm(alloc: std.mem.Allocator, term: cbor.Term) !cbor.Term {
                 out[i] = .{ .key = e.key, .value = try cloneTerm(alloc, e.value) };
             }
             break :blk cbor.Term{ .map_u64 = out };
+        },
+        .tag => |t| blk: {
+            const value = try alloc.create(cbor.Term);
+            errdefer alloc.destroy(value);
+            value.* = try cloneTerm(alloc, t.value.*);
+            break :blk cbor.Term{ .tag = .{ .tag = t.tag, .value = value } };
         },
     };
 }
@@ -90,6 +97,10 @@ fn printTerm(term: cbor.Term, level: usize) void {
             printIndent(level);
             std.debug.print("bool {s}\n", .{if (v) "true" else "false"});
         },
+        .null => {
+            printIndent(level);
+            std.debug.print("null\n", .{});
+        },
         .text => |v| {
             printIndent(level);
             std.debug.print("text \"{s}\"\n", .{v});
@@ -118,6 +129,11 @@ fn printTerm(term: cbor.Term, level: usize) void {
                 printTerm(entry.value, level + 2);
             }
         },
+        .tag => |t| {
+            printIndent(level);
+            std.debug.print("tag {d}\n", .{t.tag});
+            printTerm(t.value.*, level + 1);
+        },
     }
 }
 
@@ -138,6 +154,8 @@ fn printBlockShallow(term: cbor.Term) void {
                     .i64 => std.debug.print("  [{d}] i64\n", .{i}),
                     .bool => std.debug.print("  [{d}] bool\n", .{i}),
                     .text => std.debug.print("  [{d}] text\n", .{i}),
+                    .null => std.debug.print("  [{d}] null\n", .{i}),
+                    .tag => |t| std.debug.print("  [{d}] tag {d}\n", .{ i, t.tag }),
                 }
             }
         },
@@ -149,6 +167,8 @@ fn printBlockShallow(term: cbor.Term) void {
         .bool => std.debug.print("block: bool\n", .{}),
         .text => std.debug.print("block: text\n", .{}),
         .bytes => std.debug.print("block: bytes\n", .{}),
+        .null => std.debug.print("block: null\n", .{}),
+        .tag => |t| std.debug.print("block: tag {d}\n", .{t.tag}),
     }
 }
 
@@ -356,6 +376,7 @@ fn printTermShallow(index: usize, term: cbor.Term) void {
         .u64 => |v| std.debug.print("block inner[{d}]: u64 {d}\n", .{ index, v }),
         .i64 => |v| std.debug.print("block inner[{d}]: i64 {d}\n", .{ index, v }),
         .bool => |v| std.debug.print("block inner[{d}]: bool {s}\n", .{ index, if (v) "true" else "false" }),
+        .null => std.debug.print("block inner[{d}]: null\n", .{index}),
         .text => |v| std.debug.print("block inner[{d}]: text len={d}\n", .{ index, v.len }),
         .bytes => |b| {
             const end = if (b.len < 8) b.len else 8;
@@ -366,6 +387,7 @@ fn printTermShallow(index: usize, term: cbor.Term) void {
         },
         .array => |items| std.debug.print("block inner[{d}]: array len={d}\n", .{ index, items.len }),
         .map_u64 => |entries| std.debug.print("block inner[{d}]: map len={d}\n", .{ index, entries.len }),
+        .tag => |t| std.debug.print("block inner[{d}]: tag {d}\n", .{ index, t.tag }),
     }
 }
 
@@ -374,6 +396,7 @@ fn printInner1Term(term: cbor.Term) void {
         .u64 => |v| std.debug.print("inner1 term: u64 {d}\n", .{v}),
         .i64 => |v| std.debug.print("inner1 term: i64 {d}\n", .{v}),
         .bool => |v| std.debug.print("inner1 term: bool {s}\n", .{if (v) "true" else "false"}),
+        .null => std.debug.print("inner1 term: null\n", .{}),
         .text => |v| std.debug.print("inner1 term: text len={d}\n", .{v.len}),
         .bytes => |b| {
             const end = if (b.len < 8) b.len else 8;
@@ -392,6 +415,7 @@ fn printInner1Term(term: cbor.Term) void {
                     .u64 => |v| std.debug.print("inner1[{d}]: u64 {d}\n", .{ i, v }),
                     .i64 => |v| std.debug.print("inner1[{d}]: i64 {d}\n", .{ i, v }),
                     .bool => |v| std.debug.print("inner1[{d}]: bool {s}\n", .{ i, if (v) "true" else "false" }),
+                    .null => std.debug.print("inner1[{d}]: null\n", .{i}),
                     .text => |v| std.debug.print("inner1[{d}]: text len={d}\n", .{ i, v.len }),
                     .bytes => |b| {
                         const end = if (b.len < 8) b.len else 8;
@@ -402,6 +426,7 @@ fn printInner1Term(term: cbor.Term) void {
                     },
                     .array => |arr| std.debug.print("inner1[{d}]: array len={d}\n", .{ i, arr.len }),
                     .map_u64 => |map| std.debug.print("inner1[{d}]: map len={d}\n", .{ i, map.len }),
+                    .tag => |t| std.debug.print("inner1[{d}]: tag {d}\n", .{ i, t.tag }),
                 }
             }
         },
@@ -416,6 +441,7 @@ fn printInner1Term(term: cbor.Term) void {
                     .u64 => |v| std.debug.print("inner1[{d}]: key={d} u64 {d}\n", .{ i, entry.key, v }),
                     .i64 => |v| std.debug.print("inner1[{d}]: key={d} i64 {d}\n", .{ i, entry.key, v }),
                     .bool => |v| std.debug.print("inner1[{d}]: key={d} bool {s}\n", .{ i, entry.key, if (v) "true" else "false" }),
+                    .null => std.debug.print("inner1[{d}]: key={d} null\n", .{ i, entry.key }),
                     .text => |v| std.debug.print("inner1[{d}]: key={d} text len={d}\n", .{ i, entry.key, v.len }),
                     .bytes => |b| {
                         const end = if (b.len < 8) b.len else 8;
@@ -426,9 +452,11 @@ fn printInner1Term(term: cbor.Term) void {
                     },
                     .array => |arr| std.debug.print("inner1[{d}]: key={d} array len={d}\n", .{ i, entry.key, arr.len }),
                     .map_u64 => |map| std.debug.print("inner1[{d}]: key={d} map len={d}\n", .{ i, entry.key, map.len }),
+                    .tag => |t| std.debug.print("inner1[{d}]: key={d} tag {d}\n", .{ i, entry.key, t.tag }),
                 }
             }
         },
+        .tag => |t| std.debug.print("inner1 term: tag {d}\n", .{t.tag}),
     }
 }
 
@@ -593,6 +621,7 @@ fn printHeaderItem(index: usize, term: cbor.Term) void {
         .u64 => |v| std.debug.print("header[{d}]: u64 {d}\n", .{ index, v }),
         .i64 => |v| std.debug.print("header[{d}]: i64 {d}\n", .{ index, v }),
         .bool => |v| std.debug.print("header[{d}]: bool {s}\n", .{ index, if (v) "true" else "false" }),
+        .null => std.debug.print("header[{d}]: null\n", .{index}),
         .text => |v| std.debug.print("header[{d}]: text len={d}\n", .{ index, v.len }),
         .bytes => |b| {
             const end = if (b.len < 8) b.len else 8;
@@ -603,6 +632,7 @@ fn printHeaderItem(index: usize, term: cbor.Term) void {
         },
         .array => |items| std.debug.print("header[{d}]: array len={d}\n", .{ index, items.len }),
         .map_u64 => |entries| std.debug.print("header[{d}]: map len={d}\n", .{ index, entries.len }),
+        .tag => |t| std.debug.print("header[{d}]: tag {d}\n", .{ index, t.tag }),
     }
 }
 
@@ -611,6 +641,7 @@ fn printHeaderItemNested(parent: usize, index: usize, term: cbor.Term) void {
         .u64 => |v| std.debug.print("header[{d}][{d}]: u64 {d}\n", .{ parent, index, v }),
         .i64 => |v| std.debug.print("header[{d}][{d}]: i64 {d}\n", .{ parent, index, v }),
         .bool => |v| std.debug.print("header[{d}][{d}]: bool {s}\n", .{ parent, index, if (v) "true" else "false" }),
+        .null => std.debug.print("header[{d}][{d}]: null\n", .{ parent, index }),
         .text => |v| std.debug.print("header[{d}][{d}]: text len={d}\n", .{ parent, index, v.len }),
         .bytes => |b| {
             const end = if (b.len < 8) b.len else 8;
@@ -621,6 +652,7 @@ fn printHeaderItemNested(parent: usize, index: usize, term: cbor.Term) void {
         },
         .array => |items| std.debug.print("header[{d}][{d}]: array len={d}\n", .{ parent, index, items.len }),
         .map_u64 => |entries| std.debug.print("header[{d}][{d}]: map len={d}\n", .{ parent, index, entries.len }),
+        .tag => |t| std.debug.print("header[{d}][{d}]: tag {d}\n", .{ parent, index, t.tag }),
     }
 }
 

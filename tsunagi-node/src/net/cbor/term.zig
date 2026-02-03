@@ -6,10 +6,12 @@ pub const Term = union(enum) {
     u64: u64,
     i64: i64,
     bool: bool,
+    null: void,
     bytes: []const u8,
     text: []const u8,
     array: []Term,
     map_u64: []MapEntry,
+    tag: struct { tag: u64, value: *Term },
 };
 
 pub fn encode(term: Term, writer: anytype) !void {
@@ -24,6 +26,7 @@ pub fn encode(term: Term, writer: anytype) !void {
             }
         },
         .bool => |v| try writer.writeByte(if (v) 0xF5 else 0xF4),
+        .null => try writer.writeByte(0xF6),
         .bytes => |b| {
             try encodeTypeAndLen(2, b.len, writer);
             try writer.writeAll(b);
@@ -43,6 +46,10 @@ pub fn encode(term: Term, writer: anytype) !void {
                 try encode(e.value, writer);
             }
         },
+        .tag => |t| {
+            try encodeTypeAndLen(6, t.tag, writer);
+            try encode(t.value.*, writer);
+        },
     }
 }
 
@@ -55,6 +62,7 @@ pub fn free(term: Term, alloc: std.mem.Allocator) void {
         .u64 => {},
         .i64 => {},
         .bool => {},
+        .null => {},
         .bytes => |b| alloc.free(b),
         .text => |t| alloc.free(t),
         .array => |items| {
@@ -64,6 +72,10 @@ pub fn free(term: Term, alloc: std.mem.Allocator) void {
         .map_u64 => |entries| {
             for (entries) |e| free(e.value, alloc);
             alloc.free(entries);
+        },
+        .tag => |t| {
+            free(t.value.*, alloc);
+            alloc.destroy(t.value);
         },
     }
 }
@@ -160,12 +172,16 @@ fn decodeTerm(alloc: std.mem.Allocator, reader: anytype) !Term {
             break :blk Term{ .map_u64 = entries };
         },
         6 => blk: {
-            const raw = try decodeUnsupportedAsBytes(alloc, reader, initial);
-            break :blk Term{ .bytes = raw };
+            const tag = try decodeLen(addl, reader);
+            const value = try alloc.create(Term);
+            errdefer alloc.destroy(value);
+            value.* = try decodeTerm(alloc, reader);
+            break :blk Term{ .tag = .{ .tag = tag, .value = value } };
         },
         7 => switch (addl) {
             20 => Term{ .bool = false },
             21 => Term{ .bool = true },
+            22 => Term{ .null = {} },
             else => blk: {
                 const raw = try decodeUnsupportedAsBytes(alloc, reader, initial);
                 break :blk Term{ .bytes = raw };
@@ -320,6 +336,7 @@ fn termEqual(a: Term, b: Term) bool {
         .u64 => |av| b == .u64 and b.u64 == av,
         .i64 => |av| b == .i64 and b.i64 == av,
         .bool => |av| b == .bool and b.bool == av,
+        .null => b == .null,
         .bytes => |ab| b == .bytes and std.mem.eql(u8, ab, b.bytes),
         .text => |at| b == .text and std.mem.eql(u8, at, b.text),
         .array => |aa| blk: {
@@ -337,6 +354,7 @@ fn termEqual(a: Term, b: Term) bool {
             }
             break :blk true;
         },
+        .tag => |at| b == .tag and b.tag.tag == at.tag and termEqual(at.value.*, b.tag.value.*),
     };
 }
 
@@ -418,6 +436,36 @@ test "cbor term encode/decode roundtrip composite" {
     free(t, alloc);
 }
 
+test "cbor term encode/decode roundtrip null and tag" {
+    const alloc = std.testing.allocator;
+
+    const t1 = Term{ .null = {} };
+    const b1 = try encodeToBytes(alloc, t1);
+    defer alloc.free(b1);
+
+    var fbs1 = std.io.fixedBufferStream(b1);
+    const d1 = try decode(alloc, fbs1.reader());
+    defer free(d1, alloc);
+    try std.testing.expect(termEqual(t1, d1));
+
+    const tag_value = try alloc.create(Term);
+    tag_value.* = Term{ .u64 = 1 };
+    const t2 = Term{ .tag = .{ .tag = 8, .value = tag_value } };
+    const b2 = try encodeToBytes(alloc, t2);
+    defer alloc.free(b2);
+
+    var fbs2 = std.io.fixedBufferStream(b2);
+    const d2 = try decode(alloc, fbs2.reader());
+    defer free(d2, alloc);
+    try std.testing.expect(termEqual(t2, d2));
+
+    const b3 = try encodeToBytes(alloc, d2);
+    defer alloc.free(b3);
+    try std.testing.expect(std.mem.eql(u8, b2, b3));
+
+    free(t2, alloc);
+}
+
 test "cbor term decodes unsupported as bytes" {
     const alloc = std.testing.allocator;
 
@@ -426,8 +474,10 @@ test "cbor term decodes unsupported as bytes" {
 
     const t1 = try decode(alloc, fbs.reader());
     defer free(t1, alloc);
-    try std.testing.expect(t1 == .bytes);
-    try std.testing.expectEqualSlices(u8, input[0..2], t1.bytes);
+    try std.testing.expect(t1 == .tag);
+    try std.testing.expectEqual(@as(u64, 1), t1.tag.tag);
+    try std.testing.expect(t1.tag.value.* == .u64);
+    try std.testing.expectEqual(@as(u64, 0), t1.tag.value.*.u64);
 
     const t2 = try decode(alloc, fbs.reader());
     defer free(t2, alloc);

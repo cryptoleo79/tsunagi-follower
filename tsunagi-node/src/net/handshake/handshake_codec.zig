@@ -100,6 +100,7 @@ fn cloneTerm(alloc: std.mem.Allocator, term: cbor.Term) !cbor.Term {
         .u64 => |v| cbor.Term{ .u64 = v },
         .i64 => |v| cbor.Term{ .i64 = v },
         .bool => |v| cbor.Term{ .bool = v },
+        .null => cbor.Term{ .null = {} },
         .bytes => |b| cbor.Term{ .bytes = try alloc.dupe(u8, b) },
         .text => |t| cbor.Term{ .text = try alloc.dupe(u8, t) },
         .array => |items| blk: {
@@ -124,6 +125,12 @@ fn cloneTerm(alloc: std.mem.Allocator, term: cbor.Term) !cbor.Term {
             }
             break :blk cbor.Term{ .map_u64 = out };
         },
+        .tag => |t| blk: {
+            const value = try alloc.create(cbor.Term);
+            errdefer alloc.destroy(value);
+            value.* = try cloneTerm(alloc, t.value.*);
+            break :blk cbor.Term{ .tag = .{ .tag = t.tag, .value = value } };
+        },
     };
 }
 
@@ -132,6 +139,7 @@ fn termEqual(a: cbor.Term, b: cbor.Term) bool {
         .u64 => |av| b == .u64 and b.u64 == av,
         .i64 => |av| b == .i64 and b.i64 == av,
         .bool => |av| b == .bool and b.bool == av,
+        .null => b == .null,
         .bytes => |ab| b == .bytes and std.mem.eql(u8, ab, b.bytes),
         .text => |at| b == .text and std.mem.eql(u8, at, b.text),
         .array => |aa| blk: {
@@ -149,6 +157,7 @@ fn termEqual(a: cbor.Term, b: cbor.Term) bool {
             }
             break :blk true;
         },
+        .tag => |at| b == .tag and b.tag.tag == at.tag and termEqual(at.value.*, b.tag.value.*),
     };
 }
 

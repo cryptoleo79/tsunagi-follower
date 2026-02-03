@@ -18,6 +18,7 @@ fn printTermPretty(term: cbor.Term, indent: usize) void {
         .u64 => |v| std.debug.print("{d}\n", .{v}),
         .i64 => |v| std.debug.print("{d}\n", .{v}),
         .bool => |v| std.debug.print("{s}\n", .{if (v) "true" else "false"}),
+        .null => std.debug.print("null\n", .{}),
         .text => |t| std.debug.print("{s}\n", .{t}),
         .bytes => |b| std.debug.print("0x{s}\n", .{std.fmt.fmtSliceHexLower(b)}),
         .array => |items| {
@@ -38,6 +39,11 @@ fn printTermPretty(term: cbor.Term, indent: usize) void {
             }
             printIndent(indent);
             std.debug.print("}}\n", .{});
+        },
+        .tag => |t| {
+            std.debug.print("tag {d}\n", .{t.tag});
+            printIndent(indent + 1);
+            printTermPretty(t.value.*, indent + 1);
         },
     }
 }

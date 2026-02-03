@@ -10,10 +10,15 @@ fn printTerm(term: cbor.Term) void {
         .u64 => |v| std.debug.print("{d}", .{v}),
         .i64 => |v| std.debug.print("{d}", .{v}),
         .bool => |v| std.debug.print("{s}", .{if (v) "true" else "false"}),
+        .null => std.debug.print("null", .{}),
         .text => |t| std.debug.print("{s}", .{t}),
         .bytes => |b| std.debug.print("0x{s}", .{std.fmt.fmtSliceHexLower(b)}),
         .array => |items| std.debug.print("<array:{d}>", .{items.len}),
         .map_u64 => |entries| std.debug.print("<map:{d}>", .{entries.len}),
+        .tag => |t| {
+            std.debug.print("tag {d} ", .{t.tag});
+            printTerm(t.value.*);
+        },
     }
 }
 
