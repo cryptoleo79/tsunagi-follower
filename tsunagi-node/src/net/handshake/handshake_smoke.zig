@@ -18,8 +18,10 @@ fn printTerm(term: cbor.Term) void {
 pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
     var bt = try tcp_bt.connect(alloc, host, port);
     defer bt.deinit();
+    std.debug.print("handshake-smoke: TCP connected {s}:{d}\n", .{ host, port });
 
-    tcp_bt.setReadTimeout(&bt, 1000) catch {};
+    const timeout_ms: u32 = 1000;
+    tcp_bt.setReadTimeout(&bt, timeout_ms) catch {};
 
     var entries = try alloc.alloc(cbor.MapEntry, 1);
     entries[0] = .{ .key = 14, .value = .{ .u64 = 0 } };
@@ -38,22 +40,29 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
     defer alloc.free(frame);
 
     try bt.writeAll(frame);
+    std.debug.print("handshake-smoke: sent {d} bytes\n", .{frame.len});
 
     var buf: [4096]u8 = undefined;
     const n = bt.readAtMost(&buf) catch |err| switch (err) {
+        error.EndOfStream,
         error.ConnectionResetByPeer,
+        error.ConnectionAborted,
         error.ConnectionTimedOut,
         error.BrokenPipe,
         error.WouldBlock,
         => {
-            std.debug.print("handshake-smoke: no response\n", .{});
+            if (err == error.ConnectionTimedOut or err == error.WouldBlock) {
+                std.debug.print("handshake-smoke: timed out after {d}ms\n", .{timeout_ms});
+            } else {
+                std.debug.print("handshake-smoke: peer closed\n", .{});
+            }
             return;
         },
         else => return err,
     };
 
     if (n == 0) {
-        std.debug.print("handshake-smoke: no response\n", .{});
+        std.debug.print("handshake-smoke: peer closed\n", .{});
         return;
     }
 
