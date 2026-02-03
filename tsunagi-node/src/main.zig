@@ -10,6 +10,7 @@ const memory_bt = @import("net/transport/memory_byte_transport.zig");
 const tcp_smoke = @import("net/transport/tcp_smoke.zig");
 const tcp_framed_mod = @import("net/transport/tcp_framed.zig");
 const handshake_smoke = @import("net/handshake/handshake_smoke.zig");
+const handshake_mux_smoke = @import("net/handshake/handshake_mux_smoke.zig");
 
 fn printMsg(msg: Message) void {
     switch (msg) {
@@ -27,6 +28,7 @@ fn usage() void {
         \\  zig build run -- tcp-smoke <host> <port>
         \\  zig build run -- tcp-framed <host> <port>
         \\  zig build run -- handshake-smoke <host> <port>
+        \\  zig build run -- handshake-mux-smoke <host> <port>
         \\
         \\Default: runs in-memory framed mux demo.
         \\
@@ -91,6 +93,21 @@ pub fn main() !void {
                 return error.InvalidArgs;
             };
             try handshake_smoke.run(alloc, host, port_u);
+            return;
+        } else if (std.mem.eql(u8, cmd, "handshake-mux-smoke")) {
+            const host = args_it.next() orelse {
+                usage();
+                return error.InvalidArgs;
+            };
+            const port_s = args_it.next() orelse {
+                usage();
+                return error.InvalidArgs;
+            };
+            const port_u = std.fmt.parseUnsigned(u16, port_s, 10) catch {
+                usage();
+                return error.InvalidArgs;
+            };
+            try handshake_mux_smoke.run(alloc, host, port_u);
             return;
         } else {
             usage();
