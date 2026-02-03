@@ -62,4 +62,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     test_step.dependOn(&b.addRunArtifact(muxwire_tests).step);
+
+    const chainsync_tests = b.addTest(.{
+        .root_source_file = b.path("src/chainsync_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    test_step.dependOn(&b.addRunArtifact(chainsync_tests).step);
 }
