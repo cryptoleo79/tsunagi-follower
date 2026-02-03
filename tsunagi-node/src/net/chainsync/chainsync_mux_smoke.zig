@@ -30,15 +30,102 @@ fn printPoint(term: cbor.Term) void {
     std.debug.print("point: (opaque)\n", .{});
 }
 
-fn printTip(term: cbor.Term) void {
-    if (term == .array) {
-        const items = term.array;
-        if (items.len >= 1 and items[0] == .u64) {
-            std.debug.print("tip: slot={d}\n", .{items[0].u64});
+fn printIndent(level: usize) void {
+    var i: usize = 0;
+    while (i < level) : (i += 1) {
+        std.debug.print("  ", .{});
+    }
+}
+
+fn printTerm(term: cbor.Term, level: usize) void {
+    switch (term) {
+        .u64 => |v| {
+            printIndent(level);
+            std.debug.print("u64 {d}\n", .{v});
+        },
+        .i64 => |v| {
+            printIndent(level);
+            std.debug.print("i64 {d}\n", .{v});
+        },
+        .bool => |v| {
+            printIndent(level);
+            std.debug.print("bool {s}\n", .{if (v) "true" else "false"});
+        },
+        .text => |v| {
+            printIndent(level);
+            std.debug.print("text \"{s}\"\n", .{v});
+        },
+        .bytes => |v| {
+            const end = if (v.len < 8) v.len else 8;
+            printIndent(level);
+            std.debug.print(
+                "bytes {s} len={d}\n",
+                .{ std.fmt.fmtSliceHexLower(v[0..end]), v.len },
+            );
+        },
+        .array => |items| {
+            printIndent(level);
+            std.debug.print("array len={d}\n", .{items.len});
+            for (items) |item| {
+                printTerm(item, level + 1);
+            }
+        },
+        .map_u64 => |entries| {
+            printIndent(level);
+            std.debug.print("map_u64 len={d}\n", .{entries.len});
+            for (entries) |entry| {
+                printIndent(level + 1);
+                std.debug.print("key {d}\n", .{entry.key});
+                printTerm(entry.value, level + 2);
+            }
+        },
+    }
+}
+
+fn printTipArray(items: []const cbor.Term) void {
+    if (items.len == 2 and items[0] == .array and items[1] == .u64) {
+        const inner = items[0].array;
+        if (inner.len == 2 and inner[0] == .u64 and inner[1] == .bytes) {
+            const slot = inner[0].u64;
+            const hash = inner[1].bytes;
+            const block_no = items[1].u64;
+            const end = if (hash.len < 8) hash.len else 8;
+            std.debug.print(
+                "tip: slot={d} blockNo={d} hash={s}\n",
+                .{ slot, block_no, std.fmt.fmtSliceHexLower(hash[0..end]) },
+            );
             return;
         }
     }
+    if (items.len >= 1 and items[0] == .u64) {
+        if (items.len >= 3 and items[2] == .u64) {
+            std.debug.print(
+                "tip: slot={d} blockNo={d}\n",
+                .{ items[0].u64, items[2].u64 },
+            );
+            return;
+        }
+        std.debug.print("tip: slot={d}\n", .{items[0].u64});
+        return;
+    }
     std.debug.print("tip: (opaque)\n", .{});
+    std.debug.print("tip term:\n", .{});
+    printTerm(.{ .array = @constCast(items) }, 1);
+}
+
+fn printTip(term: cbor.Term) void {
+    if (term == .array) {
+        const items = term.array;
+        if (items.len == 1 and items[0] == .array) {
+            printTipArray(items[0].array);
+            return;
+        }
+        printTipArray(items);
+        return;
+    }
+    std.debug.print("tip: (opaque)\n", .{});
+    std.debug.print("tip term:\n", .{});
+    printTerm(term, 1);
 }
 
 fn doHandshake(alloc: std.mem.Allocator, bt: *bt_boundary.ByteTransport) !bool {
