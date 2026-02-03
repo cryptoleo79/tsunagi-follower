@@ -121,6 +121,37 @@ fn printTerm(term: cbor.Term, level: usize) void {
     }
 }
 
+fn printBlockShallow(term: cbor.Term) void {
+    std.debug.print("block term:\n", .{});
+    switch (term) {
+        .array => |items| {
+            std.debug.print("array len={d}\n", .{items.len});
+            const max_items = if (items.len < 2) items.len else 2;
+            var i: usize = 0;
+            while (i < max_items) : (i += 1) {
+                const item = items[i];
+                switch (item) {
+                    .u64 => |v| std.debug.print("  [{d}] u64 {d}\n", .{ i, v }),
+                    .bytes => |b| std.debug.print("  [{d}] bytes len={d}\n", .{ i, b.len }),
+                    .array => std.debug.print("  [{d}] array\n", .{i}),
+                    .map_u64 => std.debug.print("  [{d}] map_u64\n", .{i}),
+                    .i64 => std.debug.print("  [{d}] i64\n", .{i}),
+                    .bool => std.debug.print("  [{d}] bool\n", .{i}),
+                    .text => std.debug.print("  [{d}] text\n", .{i}),
+                }
+            }
+        },
+        .map_u64 => |entries| {
+            std.debug.print("map len={d}\n", .{entries.len});
+        },
+        .u64 => std.debug.print("block: u64\n", .{}),
+        .i64 => std.debug.print("block: i64\n", .{}),
+        .bool => std.debug.print("block: bool\n", .{}),
+        .text => std.debug.print("block: text\n", .{}),
+        .bytes => std.debug.print("block: bytes\n", .{}),
+    }
+}
+
 fn printTipArray(items: []const cbor.Term) void {
     if (items.len == 2 and items[0] == .array and items[1] == .u64) {
         const inner = items[0].array;
@@ -321,6 +352,7 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
                                     },
                                     .roll_forward => {
                                         std.debug.print("chainsync[{d}]: roll forward\n", .{i});
+                                        printBlockShallow(next_msg.roll_forward.block);
                                         printTip(next_msg.roll_forward.tip);
                                         try storeTip(alloc, &last_tip, next_msg.roll_forward.tip);
                                         awaiting_reply = false;
