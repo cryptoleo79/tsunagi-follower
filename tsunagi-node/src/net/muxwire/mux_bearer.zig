@@ -21,6 +21,26 @@ fn readExactOrNull(bt: *byte_transport.ByteTransport, buf: []u8) !bool {
     return true;
 }
 
+fn readExactOrNullOrTimeout(bt: *byte_transport.ByteTransport, buf: []u8) !?void {
+    var filled: usize = 0;
+    while (filled < buf.len) {
+        const n = bt.readAtMost(buf[filled..]) catch |err| switch (err) {
+            error.EndOfStream,
+            error.ConnectionResetByPeer,
+            error.ConnectionAborted,
+            => return null,
+            error.WouldBlock,
+            error.TimedOut,
+            error.ConnectionTimedOut,
+            => return error.TimedOut,
+            else => return err,
+        };
+        if (n == 0) return null;
+        filled += n;
+    }
+    return {};
+}
+
 pub fn sendSegment(
     bt: *byte_transport.ByteTransport,
     dir: mux_header.MiniProtocolDir,
@@ -50,6 +70,29 @@ pub fn recvSegment(
     const payload = try alloc.alloc(u8, hdr.len);
     if (hdr.len != 0) {
         if (!try readExactOrNull(bt, payload)) {
+            alloc.free(payload);
+            return null;
+        }
+    }
+
+    return .{ .hdr = hdr, .payload = payload };
+}
+
+pub fn recvSegmentWithTimeout(
+    alloc: std.mem.Allocator,
+    bt: *byte_transport.ByteTransport,
+) !?struct { hdr: mux_header.Header, payload: []u8 } {
+    var header_buf: [8]u8 = undefined;
+    if ((try readExactOrNullOrTimeout(bt, &header_buf)) == null) return null;
+
+    const hdr = try mux_header.decode(&header_buf);
+    const payload = try alloc.alloc(u8, hdr.len);
+    if (hdr.len != 0) {
+        const read_result = readExactOrNullOrTimeout(bt, payload) catch |err| {
+            alloc.free(payload);
+            return err;
+        };
+        if (read_result == null) {
             alloc.free(payload);
             return null;
         }

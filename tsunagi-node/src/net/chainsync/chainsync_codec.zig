@@ -29,7 +29,7 @@ pub fn encodeFindIntersect(writer: anytype, points: cbor.Term) anyerror!void {
     if (points != .array) return error.InvalidType;
 
     var items: [2]cbor.Term = undefined;
-    items[0] = .{ .u64 = 0 };
+    items[0] = .{ .u64 = 4 };
     items[1] = points;
 
     const term = cbor.Term{ .array = items[0..2] };
@@ -46,12 +46,12 @@ pub fn decodeResponse(alloc: std.mem.Allocator, reader: anytype) anyerror!Msg {
     if (items[0] != .u64) return error.InvalidType;
 
     return switch (items[0].u64) {
-        1 => blk: {
+        5 => blk: {
             if (items.len < 2) return error.InvalidLength;
             const payload = try cloneTerm(alloc, items[1]);
             break :blk Msg{ .intersect_found = .{ .payload = payload } };
         },
-        2 => blk: {
+        6 => blk: {
             if (items.len < 2) return error.InvalidLength;
             const payload = try cloneTerm(alloc, items[1]);
             break :blk Msg{ .intersect_not_found = .{ .payload = payload } };

@@ -47,7 +47,7 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
     var bt = try tcp_bt.connect(alloc, host, port);
     defer bt.deinit();
 
-    const timeout_ms: u32 = 1000;
+    const timeout_ms: u32 = 10_000;
     tcp_bt.setReadTimeout(&bt, timeout_ms) catch {};
 
     const accepted = try doHandshake(alloc, &bt);
@@ -56,29 +56,65 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
         return;
     }
 
-    const empty_points = cbor.Term{ .array = @constCast((&[_]cbor.Term{})[0..]) };
+    const origin_point = cbor.Term{ .array = @constCast((&[_]cbor.Term{})[0..]) };
+    var points_items = try alloc.alloc(cbor.Term, 1);
+    defer alloc.free(points_items);
+    points_items[0] = origin_point;
+    const points = cbor.Term{ .array = points_items };
     var list = std.ArrayList(u8).init(alloc);
     defer list.deinit();
-    try chainsync_codec.encodeFindIntersect(list.writer(), empty_points);
+    try chainsync_codec.encodeFindIntersect(list.writer(), points);
     const msg_bytes = try list.toOwnedSlice();
     defer alloc.free(msg_bytes);
 
-    try mux_bearer.sendSegment(&bt, .initiator, chainsync_proto, msg_bytes);
+    try mux_bearer.sendSegment(&bt, .responder, chainsync_proto, msg_bytes);
+    std.debug.print("chainsync: sent FindIntersect ({d} bytes)\n", .{msg_bytes.len});
 
-    const seg = try mux_bearer.recvSegment(alloc, &bt);
-    if (seg == null) {
-        std.debug.print("chainsync: no response\n", .{});
-        return;
-    }
-    defer alloc.free(seg.?.payload);
+    const deadline_ms: i64 = std.time.milliTimestamp() + timeout_ms;
 
-    var fbs = std.io.fixedBufferStream(seg.?.payload);
-    var msg = try chainsync_codec.decodeResponse(alloc, fbs.reader());
-    defer chainsync_codec.free(alloc, &msg);
+    while (true) {
+        const now_ms = std.time.milliTimestamp();
+        if (now_ms >= deadline_ms) {
+            std.debug.print("chainsync: timed out after 10000ms\n", .{});
+            return;
+        }
 
-    switch (msg) {
-        .intersect_found => std.debug.print("chainsync: intersect found\n", .{}),
-        .intersect_not_found => std.debug.print("chainsync: intersect not found\n", .{}),
-        else => std.debug.print("chainsync: no response\n", .{}),
+        const remaining_ms: u32 = @intCast(deadline_ms - now_ms);
+        tcp_bt.setReadTimeout(&bt, remaining_ms) catch {};
+
+        const seg = mux_bearer.recvSegmentWithTimeout(alloc, &bt) catch |err| switch (err) {
+            error.TimedOut => continue,
+            else => return err,
+        };
+        if (seg == null) {
+            std.debug.print("peer closed\n", .{});
+            return;
+        }
+        defer alloc.free(seg.?.payload);
+
+        const hdr = seg.?.hdr;
+        std.debug.print(
+            "mux: rx hdr dir={s} proto={d} len={d}\n",
+            .{ @tagName(hdr.dir), hdr.proto, hdr.len },
+        );
+
+        if (hdr.proto == chainsync_proto) {
+            var fbs = std.io.fixedBufferStream(seg.?.payload);
+            var msg = try chainsync_codec.decodeResponse(alloc, fbs.reader());
+            defer chainsync_codec.free(alloc, &msg);
+
+            switch (msg) {
+                .intersect_found => std.debug.print("chainsync: intersect found\n", .{}),
+                .intersect_not_found => std.debug.print("chainsync: intersect not found\n", .{}),
+                else => std.debug.print("chainsync: no response\n", .{}),
+            }
+            return;
+        } else if (hdr.proto == 8) {
+            std.debug.print("keepalive: rx (ignored)\n", .{});
+            continue;
+        } else {
+            std.debug.print("mux: rx unexpected proto={d}\n", .{hdr.proto});
+            continue;
+        }
     }
 }

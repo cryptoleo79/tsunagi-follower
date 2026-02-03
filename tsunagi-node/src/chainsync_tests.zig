@@ -21,15 +21,15 @@ test "chainsync find intersect encode golden" {
     const bytes = try list.toOwnedSlice();
     defer alloc.free(bytes);
 
-    const expected = [_]u8{ 0x82, 0x00, 0x80 };
+    const expected = [_]u8{ 0x82, 0x04, 0x80 };
     try std.testing.expectEqualSlices(u8, &expected, bytes);
 }
 
 test "chainsync decode intersect responses" {
     const alloc = std.testing.allocator;
 
-    const found_term = cbor.Term{ .array = @constCast((&[_]cbor.Term{ .{ .u64 = 1 }, .{ .u64 = 42 } })[0..]) };
-    const not_found_term = cbor.Term{ .array = @constCast((&[_]cbor.Term{ .{ .u64 = 2 }, .{ .text = @constCast("nope") } })[0..]) };
+    const found_term = cbor.Term{ .array = @constCast((&[_]cbor.Term{ .{ .u64 = 5 }, .{ .u64 = 42 } })[0..]) };
+    const not_found_term = cbor.Term{ .array = @constCast((&[_]cbor.Term{ .{ .u64 = 6 }, .{ .text = @constCast("nope") } })[0..]) };
 
     const found_bytes = try encodeToBytes(alloc, found_term);
     defer alloc.free(found_bytes);
