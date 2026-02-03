@@ -164,6 +164,26 @@ fn printBlockHash(term: cbor.Term) void {
                 "block: era={d} bytes={d} blake2b256={s}\n",
                 .{ era_id, bytes.len, std.fmt.fmtSliceHexLower(&digest) },
             );
+
+            const prefix_len = if (bytes.len < 16) bytes.len else 16;
+            std.debug.print(
+                "block: era={d} bytes={d} prefix={s}\n",
+                .{ era_id, bytes.len, std.fmt.fmtSliceHexLower(bytes[0..prefix_len]) },
+            );
+            if (bytes.len > 0) {
+                const major: u8 = bytes[0] >> 5;
+                const kind = switch (major) {
+                    0 => "uint",
+                    1 => "negint",
+                    2 => "bytes",
+                    3 => "text",
+                    4 => "array",
+                    5 => "map",
+                    6 => "tag",
+                    else => "simple",
+                };
+                std.debug.print("cbor top: {s}\n", .{kind});
+            }
         }
     }
 }
