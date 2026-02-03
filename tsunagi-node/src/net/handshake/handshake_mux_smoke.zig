@@ -16,6 +16,8 @@ fn printIndent(indent: usize) void {
 fn printTermPretty(term: cbor.Term, indent: usize) void {
     switch (term) {
         .u64 => |v| std.debug.print("{d}\n", .{v}),
+        .i64 => |v| std.debug.print("{d}\n", .{v}),
+        .bool => |v| std.debug.print("{s}\n", .{if (v) "true" else "false"}),
         .text => |t| std.debug.print("{s}\n", .{t}),
         .bytes => |b| std.debug.print("0x{s}\n", .{std.fmt.fmtSliceHexLower(b)}),
         .array => |items| {
@@ -47,8 +49,15 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
     const timeout_ms: u32 = 1000;
     tcp_bt.setReadTimeout(&bt, timeout_ms) catch {};
 
+    var version_items = try alloc.alloc(cbor.Term, 4);
+    version_items[0] = .{ .u64 = 2 };
+    version_items[1] = .{ .bool = false };
+    version_items[2] = .{ .u64 = 1 };
+    version_items[3] = .{ .bool = false };
+    const version_data = cbor.Term{ .array = version_items };
+
     var entries = try alloc.alloc(cbor.MapEntry, 1);
-    entries[0] = .{ .key = 14, .value = .{ .u64 = 0 } };
+    entries[0] = .{ .key = 14, .value = version_data };
     var propose = handshake_codec.HandshakeMsg{
         .propose = .{ .versions = .{ .map_u64 = entries } },
     };

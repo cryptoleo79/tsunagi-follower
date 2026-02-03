@@ -8,6 +8,8 @@ const tcp_bt = @import("../transport/tcp_byte_transport.zig");
 fn printTerm(term: cbor.Term) void {
     switch (term) {
         .u64 => |v| std.debug.print("{d}", .{v}),
+        .i64 => |v| std.debug.print("{d}", .{v}),
+        .bool => |v| std.debug.print("{s}", .{if (v) "true" else "false"}),
         .text => |t| std.debug.print("{s}", .{t}),
         .bytes => |b| std.debug.print("0x{s}", .{std.fmt.fmtSliceHexLower(b)}),
         .array => |items| std.debug.print("<array:{d}>", .{items.len}),
