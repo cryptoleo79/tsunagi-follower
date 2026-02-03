@@ -184,8 +184,97 @@ fn printBlockHash(term: cbor.Term) void {
                 };
                 std.debug.print("cbor top: {s}\n", .{kind});
             }
+            if (!printTag24Inner(bytes)) {
+                std.debug.print("block inner: (not tag24)\n", .{});
+            }
         }
     }
+}
+
+fn printTag24Inner(bytes: []const u8) bool {
+    if (bytes.len == 0) return false;
+    if ((bytes[0] >> 5) != 6) return false;
+
+    var index: usize = 1;
+    const ai: u8 = bytes[0] & 0x1f;
+    var tag: u32 = 0;
+    switch (ai) {
+        0...23 => tag = ai,
+        24 => {
+            if (index + 1 > bytes.len) return false;
+            tag = bytes[index];
+            index += 1;
+        },
+        25 => {
+            if (index + 2 > bytes.len) return false;
+            tag = (@as(u32, bytes[index]) << 8) | bytes[index + 1];
+            index += 2;
+        },
+        26 => {
+            if (index + 4 > bytes.len) return false;
+            tag = (@as(u32, bytes[index]) << 24) |
+                (@as(u32, bytes[index + 1]) << 16) |
+                (@as(u32, bytes[index + 2]) << 8) |
+                bytes[index + 3];
+            index += 4;
+        },
+        else => return false,
+    }
+    if (tag != 24) return false;
+    if (index >= bytes.len) return false;
+
+    const item_head = bytes[index];
+    if ((item_head >> 5) != 2) return false;
+    index += 1;
+
+    const item_ai: u8 = item_head & 0x1f;
+    var len: usize = 0;
+    switch (item_ai) {
+        0...23 => len = item_ai,
+        24 => {
+            if (index + 1 > bytes.len) return false;
+            len = bytes[index];
+            index += 1;
+        },
+        25 => {
+            if (index + 2 > bytes.len) return false;
+            len = (@as(usize, bytes[index]) << 8) | bytes[index + 1];
+            index += 2;
+        },
+        26 => {
+            if (index + 4 > bytes.len) return false;
+            len = (@as(usize, bytes[index]) << 24) |
+                (@as(usize, bytes[index + 1]) << 16) |
+                (@as(usize, bytes[index + 2]) << 8) |
+                bytes[index + 3];
+            index += 4;
+        },
+        else => return false,
+    }
+    if (index + len > bytes.len) return false;
+    const inner = bytes[index .. index + len];
+    const prefix_len = if (inner.len < 16) inner.len else 16;
+    std.debug.print(
+        "block inner: bytes={d} prefix={s}\n",
+        .{ inner.len, std.fmt.fmtSliceHexLower(inner[0..prefix_len]) },
+    );
+    if (inner.len > 0) {
+        const major: u8 = inner[0] >> 5;
+        const kind = switch (major) {
+            0 => "uint",
+            1 => "negint",
+            2 => "bytes",
+            3 => "text",
+            4 => "array",
+            5 => "map",
+            6 => "tag",
+            else => "simple",
+        };
+        std.debug.print("block inner cbor top: {s}\n", .{kind});
+    } else {
+        std.debug.print("block inner cbor top: (empty)\n", .{});
+    }
+    return true;
 }
 
 fn printTipArray(items: []const cbor.Term) void {
