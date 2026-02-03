@@ -6,13 +6,37 @@ const mux_bearer = @import("../muxwire/mux_bearer.zig");
 const mux_header = @import("../muxwire/mux_header.zig");
 const tcp_bt = @import("../transport/tcp_byte_transport.zig");
 
-fn printTerm(term: cbor.Term) void {
+fn printIndent(indent: usize) void {
+    var i: usize = 0;
+    while (i < indent) : (i += 1) {
+        std.debug.print("  ", .{});
+    }
+}
+
+fn printTermPretty(term: cbor.Term, indent: usize) void {
     switch (term) {
-        .u64 => |v| std.debug.print("{d}", .{v}),
-        .text => |t| std.debug.print("{s}", .{t}),
-        .bytes => |b| std.debug.print("0x{s}", .{std.fmt.fmtSliceHexLower(b)}),
-        .array => |items| std.debug.print("<array:{d}>", .{items.len}),
-        .map_u64 => |entries| std.debug.print("<map:{d}>", .{entries.len}),
+        .u64 => |v| std.debug.print("{d}\n", .{v}),
+        .text => |t| std.debug.print("{s}\n", .{t}),
+        .bytes => |b| std.debug.print("0x{s}\n", .{std.fmt.fmtSliceHexLower(b)}),
+        .array => |items| {
+            std.debug.print("[\n", .{});
+            for (items) |item| {
+                printIndent(indent + 1);
+                printTermPretty(item, indent + 1);
+            }
+            printIndent(indent);
+            std.debug.print("]\n", .{});
+        },
+        .map_u64 => |entries| {
+            std.debug.print("{{\n", .{});
+            for (entries) |entry| {
+                printIndent(indent + 1);
+                std.debug.print("{d}: ", .{entry.key});
+                printTermPretty(entry.value, indent + 1);
+            }
+            printIndent(indent);
+            std.debug.print("}}\n", .{});
+        },
     }
 }
 
@@ -61,9 +85,9 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
     switch (msg) {
         .accept => |a| std.debug.print("handshake-mux-smoke: accept version {d}\n", .{a.version}),
         .refuse => |r| {
-            std.debug.print("handshake-mux-smoke: refused: ", .{});
-            printTerm(r.reason);
-            std.debug.print("\n", .{});
+            std.debug.print("handshake-mux-smoke: refused:\n", .{});
+            printIndent(1);
+            printTermPretty(r.reason, 1);
         },
         .propose => std.debug.print("handshake-mux-smoke: unexpected propose\n", .{}),
     }
