@@ -175,9 +175,15 @@ fn printBlockShallow(term: cbor.Term) void {
 fn printBlockHash(alloc: std.mem.Allocator, term: cbor.Term) void {
     if (term == .array) {
         const items = term.array;
-        if (items.len >= 2 and items[0] == .u64 and items[1] == .bytes) {
+        if (items.len >= 2 and items[0] == .u64) {
             const era_id = items[0].u64;
-            const bytes = items[1].bytes;
+            const bytes = blk: {
+                if (items[1] == .bytes) break :blk items[1].bytes;
+                if (items[1] == .tag and items[1].tag.tag == 24 and items[1].tag.value.* == .bytes) {
+                    break :blk items[1].tag.value.*.bytes;
+                }
+                return;
+            };
             var digest: [32]u8 = undefined;
             std.crypto.hash.blake2.Blake2b256.hash(bytes, &digest, .{});
             std.debug.print(
@@ -206,6 +212,7 @@ fn printBlockHash(alloc: std.mem.Allocator, term: cbor.Term) void {
             }
             if (!printTag24Inner(alloc, bytes)) {
                 std.debug.print("block inner: (not tag24)\n", .{});
+                printInnerBytes(alloc, bytes);
             }
         }
     }
@@ -273,6 +280,11 @@ fn printTag24Inner(alloc: std.mem.Allocator, bytes: []const u8) bool {
     }
     if (index + len > bytes.len) return false;
     const inner = bytes[index .. index + len];
+    printInnerBytes(alloc, inner);
+    return true;
+}
+
+fn printInnerBytes(alloc: std.mem.Allocator, inner: []const u8) void {
     const prefix_len = if (inner.len < 16) inner.len else 16;
     std.debug.print(
         "block inner: bytes={d} prefix={s}\n",
@@ -280,7 +292,7 @@ fn printTag24Inner(alloc: std.mem.Allocator, bytes: []const u8) bool {
     );
     if (inner.len == 0) {
         std.debug.print("block inner cbor top: (empty)\n", .{});
-        return true;
+        return;
     }
 
     const inner_major: u8 = inner[0] >> 5;
@@ -296,43 +308,43 @@ fn printTag24Inner(alloc: std.mem.Allocator, bytes: []const u8) bool {
     };
     std.debug.print("block inner cbor top: {s}\n", .{inner_kind});
 
-    if (inner_major != 4) return true;
+    if (inner_major != 4) return;
     var inner_index: usize = 1;
     const inner_ai: u8 = inner[0] & 0x1f;
     var array_len: usize = 0;
     switch (inner_ai) {
         0...23 => array_len = inner_ai,
         24 => {
-            if (inner_index + 1 > inner.len) return true;
+            if (inner_index + 1 > inner.len) return;
             array_len = inner[inner_index];
             inner_index += 1;
         },
         25 => {
-            if (inner_index + 2 > inner.len) return true;
+            if (inner_index + 2 > inner.len) return;
             array_len = (@as(usize, inner[inner_index]) << 8) | inner[inner_index + 1];
             inner_index += 2;
         },
         26 => {
-            if (inner_index + 4 > inner.len) return true;
+            if (inner_index + 4 > inner.len) return;
             array_len = (@as(usize, inner[inner_index]) << 24) |
                 (@as(usize, inner[inner_index + 1]) << 16) |
                 (@as(usize, inner[inner_index + 2]) << 8) |
                 inner[inner_index + 3];
             inner_index += 4;
         },
-        else => return true,
+        else => return,
     }
-    if (array_len != 2) return true;
+    if (array_len != 2) return;
 
     var fbs = std.io.fixedBufferStream(inner[inner_index..]);
     const t0 = cbor.decode(alloc, fbs.reader()) catch {
         std.debug.print("block inner inspect: failed\n", .{});
-        return true;
+        return;
     };
     defer cbor.free(t0, alloc);
     const t1 = cbor.decode(alloc, fbs.reader()) catch {
         std.debug.print("block inner inspect: failed\n", .{});
-        return true;
+        return;
     };
     defer cbor.free(t1, alloc);
 
@@ -357,18 +369,9 @@ fn printTag24Inner(alloc: std.mem.Allocator, bytes: []const u8) bool {
         } else {
             std.debug.print("inner1 cbor top: (empty)\n", .{});
         }
-
-        var inner1_fbs = std.io.fixedBufferStream(inner1);
-        const inner1_term = cbor.decode(alloc, inner1_fbs.reader()) catch {
-            std.debug.print("inner1 decode: failed\n", .{});
-            std.debug.print("inner1 scan:\n", .{});
-            scanCborShallow(inner1);
-            return true;
-        };
-        defer cbor.free(inner1_term, alloc);
-        printInner1Term(inner1_term);
+        std.debug.print("inner1 scan:\n", .{});
+        scanCborShallow(inner1);
     }
-    return true;
 }
 
 fn printTermShallow(index: usize, term: cbor.Term) void {
