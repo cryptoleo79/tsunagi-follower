@@ -172,7 +172,7 @@ fn printBlockShallow(term: cbor.Term) void {
     }
 }
 
-fn printBlockHash(alloc: std.mem.Allocator, term: cbor.Term) void {
+fn printBlockHash(alloc: std.mem.Allocator, term: cbor.Term, tip_hash: ?[]const u8) void {
     if (term == .array) {
         const items = term.array;
         if (items.len >= 2 and items[0] == .u64) {
@@ -187,6 +187,37 @@ fn printBlockHash(alloc: std.mem.Allocator, term: cbor.Term) void {
                         "block_tag24_hash={s} bytes={d}\n",
                         .{ std.fmt.fmtSliceHexLower(&tag_digest), tag_bytes.len },
                     );
+                    var tag_full_list = std.ArrayList(u8).init(alloc);
+                    defer tag_full_list.deinit();
+                    cbor.encode(items[1], tag_full_list.writer()) catch return;
+                    var tag_full_digest: [32]u8 = undefined;
+                    std.crypto.hash.blake2.Blake2b256.hash(tag_full_list.items, &tag_full_digest, .{});
+                    std.debug.print(
+                        "block_tag24_full_hash={s} bytes={d}\n",
+                        .{ std.fmt.fmtSliceHexLower(&tag_full_digest), tag_full_list.items.len },
+                    );
+                    if (tip_hash) |hash| {
+                        if (hash.len == 32 and std.mem.eql(u8, tag_digest[0..], hash)) {
+                            std.debug.print("match: tip_hash == block_tag24_hash\n", .{});
+                        }
+                        const tip_prefix = hash[0..8];
+                        const tag_prefix = tag_digest[0..8];
+                        std.debug.print(
+                            "tip_hash_prefix={s}\n",
+                            .{std.fmt.fmtSliceHexLower(tip_prefix)},
+                        );
+                        std.debug.print(
+                            "tag24_hash_prefix={s} eq={s}\n",
+                            .{
+                                std.fmt.fmtSliceHexLower(tag_prefix),
+                                if (std.mem.eql(u8, tag_digest[0..], hash)) "true" else "false",
+                            },
+                        );
+                        std.debug.print(
+                            "eq_tip_vs_tag24_full={s}\n",
+                            .{if (std.mem.eql(u8, tag_full_digest[0..], hash)) "true" else "false"},
+                        );
+                    }
                     break :blk tag_bytes;
                 }
                 return;
@@ -219,7 +250,7 @@ fn printBlockHash(alloc: std.mem.Allocator, term: cbor.Term) void {
             }
             if (!printTag24Inner(alloc, bytes)) {
                 std.debug.print("block inner: (not tag24)\n", .{});
-                printInnerBytes(alloc, bytes);
+                printInnerBytes(alloc, bytes, tip_hash);
             }
         }
     }
@@ -287,11 +318,11 @@ fn printTag24Inner(alloc: std.mem.Allocator, bytes: []const u8) bool {
     }
     if (index + len > bytes.len) return false;
     const inner = bytes[index .. index + len];
-    printInnerBytes(alloc, inner);
+    printInnerBytes(alloc, inner, null);
     return true;
 }
 
-fn printInnerBytes(alloc: std.mem.Allocator, inner: []const u8) void {
+fn printInnerBytes(alloc: std.mem.Allocator, inner: []const u8, tip_hash: ?[]const u8) void {
     const prefix_len = if (inner.len < 16) inner.len else 16;
     std.debug.print(
         "block inner: bytes={d} prefix={s}\n",
@@ -356,7 +387,7 @@ fn printInnerBytes(alloc: std.mem.Allocator, inner: []const u8) void {
     defer cbor.free(t1, alloc);
 
     printTermShallow(0, t0);
-    printHeaderShallow(alloc, t0);
+    printHeaderShallow(alloc, t0, tip_hash);
     printTermShallow(1, t1);
     if (t1 == .bytes) {
         const inner1 = t1.bytes;
@@ -666,7 +697,7 @@ fn printHeaderItemNested(parent: usize, index: usize, term: cbor.Term) void {
     }
 }
 
-fn printHeaderShallow(alloc: std.mem.Allocator, term: cbor.Term) void {
+fn printHeaderShallow(alloc: std.mem.Allocator, term: cbor.Term, tip_hash: ?[]const u8) void {
     if (term != .array) return;
     const items = term.array;
     if (items.len != 15) return;
@@ -685,6 +716,48 @@ fn printHeaderShallow(alloc: std.mem.Allocator, term: cbor.Term) void {
         "block_inner_hash={s} bytes={d}\n",
         .{ std.fmt.fmtSliceHexLower(&digest), bytes.len },
     );
+    if (tip_hash) |hash| {
+        if (hash.len == 32 and std.mem.eql(u8, digest[0..], hash)) {
+            std.debug.print("match: tip_hash == block_inner_hash\n", .{});
+        }
+        const tip_prefix = hash[0..8];
+        const inner_prefix = digest[0..8];
+        std.debug.print(
+            "tip_hash_prefix={s}\n",
+            .{std.fmt.fmtSliceHexLower(tip_prefix)},
+        );
+        std.debug.print(
+            "inner_hash_prefix={s} eq={s}\n",
+            .{
+                std.fmt.fmtSliceHexLower(inner_prefix),
+                if (std.mem.eql(u8, digest[0..], hash)) "true" else "false",
+            },
+        );
+    }
+
+    var header32_indices: [15]usize = undefined;
+    var header32_count: usize = 0;
+    i = 0;
+    while (i < items.len and i < 15) : (i += 1) {
+        if (items[i] == .bytes and items[i].bytes.len == 32) {
+            header32_indices[header32_count] = i;
+            header32_count += 1;
+            if (tip_hash) |hash| {
+                if (hash.len == 32 and std.mem.eql(u8, items[i].bytes, hash)) {
+                    std.debug.print("match: tip_hash == header[{d}]\n", .{i});
+                }
+            }
+        }
+    }
+    if (header32_count > 0) {
+        std.debug.print("header32 fields: [", .{});
+        i = 0;
+        while (i < header32_count) : (i += 1) {
+            if (i > 0) std.debug.print(",", .{});
+            std.debug.print("{d}", .{header32_indices[i]});
+        }
+        std.debug.print("]\n", .{});
+    }
 
     if (items.len >= 6 and items[5] == .array) {
         const header5 = items[5].array;
@@ -741,6 +814,22 @@ fn printHeaderShallow(alloc: std.mem.Allocator, term: cbor.Term) void {
             }
         }
     }
+}
+
+fn getTipHash(term: cbor.Term) ?[]const u8 {
+    if (term != .array) return null;
+    const items = term.array;
+    const inner = blk: {
+        if (items.len == 1 and items[0] == .array) break :blk items[0].array;
+        break :blk items;
+    };
+    if (inner.len != 2) return null;
+    if (inner[0] != .array or inner[1] != .u64) return null;
+    const point = inner[0].array;
+    if (point.len != 2) return null;
+    if (point[0] != .u64 or point[1] != .bytes) return null;
+    if (point[1].bytes.len != 32) return null;
+    return point[1].bytes;
 }
 
 fn printTipArray(items: []const cbor.Term) void {
@@ -943,8 +1032,9 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
                                     },
                                     .roll_forward => {
                                         std.debug.print("chainsync[{d}]: roll forward\n", .{i});
+                                        const tip_hash = getTipHash(next_msg.roll_forward.tip);
                                         printBlockShallow(next_msg.roll_forward.block);
-                                        printBlockHash(alloc, next_msg.roll_forward.block);
+                                        printBlockHash(alloc, next_msg.roll_forward.block, tip_hash);
                                         printTip(next_msg.roll_forward.tip);
                                         try storeTip(alloc, &last_tip, next_msg.roll_forward.tip);
                                         awaiting_reply = false;
