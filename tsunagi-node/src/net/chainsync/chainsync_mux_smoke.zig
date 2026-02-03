@@ -317,6 +317,7 @@ fn printTag24Inner(alloc: std.mem.Allocator, bytes: []const u8) bool {
     defer cbor.free(t1, alloc);
 
     printTermShallow(0, t0);
+    printHeaderShallow(t0);
     printTermShallow(1, t1);
     return true;
 }
@@ -336,6 +337,35 @@ fn printTermShallow(index: usize, term: cbor.Term) void {
         },
         .array => |items| std.debug.print("block inner[{d}]: array len={d}\n", .{ index, items.len }),
         .map_u64 => |entries| std.debug.print("block inner[{d}]: map len={d}\n", .{ index, entries.len }),
+    }
+}
+
+fn printHeaderItem(index: usize, term: cbor.Term) void {
+    switch (term) {
+        .u64 => |v| std.debug.print("header[{d}]: u64 {d}\n", .{ index, v }),
+        .i64 => |v| std.debug.print("header[{d}]: i64 {d}\n", .{ index, v }),
+        .bool => |v| std.debug.print("header[{d}]: bool {s}\n", .{ index, if (v) "true" else "false" }),
+        .text => |v| std.debug.print("header[{d}]: text len={d}\n", .{ index, v.len }),
+        .bytes => |b| {
+            const end = if (b.len < 8) b.len else 8;
+            std.debug.print(
+                "header[{d}]: bytes len={d} prefix={s}\n",
+                .{ index, b.len, std.fmt.fmtSliceHexLower(b[0..end]) },
+            );
+        },
+        .array => |items| std.debug.print("header[{d}]: array len={d}\n", .{ index, items.len }),
+        .map_u64 => |entries| std.debug.print("header[{d}]: map len={d}\n", .{ index, entries.len }),
+    }
+}
+
+fn printHeaderShallow(term: cbor.Term) void {
+    if (term != .array) return;
+    const items = term.array;
+    if (items.len != 15) return;
+    const max_items = if (items.len < 6) items.len else 6;
+    var i: usize = 0;
+    while (i < max_items) : (i += 1) {
+        printHeaderItem(i, items[i]);
     }
 }
 
