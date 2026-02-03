@@ -152,7 +152,7 @@ fn printBlockShallow(term: cbor.Term) void {
     }
 }
 
-fn printBlockHash(term: cbor.Term) void {
+fn printBlockHash(alloc: std.mem.Allocator, term: cbor.Term) void {
     if (term == .array) {
         const items = term.array;
         if (items.len >= 2 and items[0] == .u64 and items[1] == .bytes) {
@@ -184,14 +184,14 @@ fn printBlockHash(term: cbor.Term) void {
                 };
                 std.debug.print("cbor top: {s}\n", .{kind});
             }
-            if (!printTag24Inner(bytes)) {
+            if (!printTag24Inner(alloc, bytes)) {
                 std.debug.print("block inner: (not tag24)\n", .{});
             }
         }
     }
 }
 
-fn printTag24Inner(bytes: []const u8) bool {
+fn printTag24Inner(alloc: std.mem.Allocator, bytes: []const u8) bool {
     if (bytes.len == 0) return false;
     if ((bytes[0] >> 5) != 6) return false;
 
@@ -258,23 +258,85 @@ fn printTag24Inner(bytes: []const u8) bool {
         "block inner: bytes={d} prefix={s}\n",
         .{ inner.len, std.fmt.fmtSliceHexLower(inner[0..prefix_len]) },
     );
-    if (inner.len > 0) {
-        const major: u8 = inner[0] >> 5;
-        const kind = switch (major) {
-            0 => "uint",
-            1 => "negint",
-            2 => "bytes",
-            3 => "text",
-            4 => "array",
-            5 => "map",
-            6 => "tag",
-            else => "simple",
-        };
-        std.debug.print("block inner cbor top: {s}\n", .{kind});
-    } else {
+    if (inner.len == 0) {
         std.debug.print("block inner cbor top: (empty)\n", .{});
+        return true;
     }
+
+    const inner_major: u8 = inner[0] >> 5;
+    const inner_kind = switch (inner_major) {
+        0 => "uint",
+        1 => "negint",
+        2 => "bytes",
+        3 => "text",
+        4 => "array",
+        5 => "map",
+        6 => "tag",
+        else => "simple",
+    };
+    std.debug.print("block inner cbor top: {s}\n", .{inner_kind});
+
+    if (inner_major != 4) return true;
+    var inner_index: usize = 1;
+    const inner_ai: u8 = inner[0] & 0x1f;
+    var array_len: usize = 0;
+    switch (inner_ai) {
+        0...23 => array_len = inner_ai,
+        24 => {
+            if (inner_index + 1 > inner.len) return true;
+            array_len = inner[inner_index];
+            inner_index += 1;
+        },
+        25 => {
+            if (inner_index + 2 > inner.len) return true;
+            array_len = (@as(usize, inner[inner_index]) << 8) | inner[inner_index + 1];
+            inner_index += 2;
+        },
+        26 => {
+            if (inner_index + 4 > inner.len) return true;
+            array_len = (@as(usize, inner[inner_index]) << 24) |
+                (@as(usize, inner[inner_index + 1]) << 16) |
+                (@as(usize, inner[inner_index + 2]) << 8) |
+                inner[inner_index + 3];
+            inner_index += 4;
+        },
+        else => return true,
+    }
+    if (array_len != 2) return true;
+
+    var fbs = std.io.fixedBufferStream(inner[inner_index..]);
+    const t0 = cbor.decode(alloc, fbs.reader()) catch {
+        std.debug.print("block inner inspect: failed\n", .{});
+        return true;
+    };
+    defer cbor.free(t0, alloc);
+    const t1 = cbor.decode(alloc, fbs.reader()) catch {
+        std.debug.print("block inner inspect: failed\n", .{});
+        return true;
+    };
+    defer cbor.free(t1, alloc);
+
+    printTermShallow(0, t0);
+    printTermShallow(1, t1);
     return true;
+}
+
+fn printTermShallow(index: usize, term: cbor.Term) void {
+    switch (term) {
+        .u64 => |v| std.debug.print("block inner[{d}]: u64 {d}\n", .{ index, v }),
+        .i64 => |v| std.debug.print("block inner[{d}]: i64 {d}\n", .{ index, v }),
+        .bool => |v| std.debug.print("block inner[{d}]: bool {s}\n", .{ index, if (v) "true" else "false" }),
+        .text => |v| std.debug.print("block inner[{d}]: text len={d}\n", .{ index, v.len }),
+        .bytes => |b| {
+            const end = if (b.len < 8) b.len else 8;
+            std.debug.print(
+                "block inner[{d}]: bytes len={d} prefix={s}\n",
+                .{ index, b.len, std.fmt.fmtSliceHexLower(b[0..end]) },
+            );
+        },
+        .array => |items| std.debug.print("block inner[{d}]: array len={d}\n", .{ index, items.len }),
+        .map_u64 => |entries| std.debug.print("block inner[{d}]: map len={d}\n", .{ index, entries.len }),
+    }
 }
 
 fn printTipArray(items: []const cbor.Term) void {
@@ -478,7 +540,7 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
                                     .roll_forward => {
                                         std.debug.print("chainsync[{d}]: roll forward\n", .{i});
                                         printBlockShallow(next_msg.roll_forward.block);
-                                        printBlockHash(next_msg.roll_forward.block);
+                                        printBlockHash(alloc, next_msg.roll_forward.block);
                                         printTip(next_msg.roll_forward.tip);
                                         try storeTip(alloc, &last_tip, next_msg.roll_forward.tip);
                                         awaiting_reply = false;
