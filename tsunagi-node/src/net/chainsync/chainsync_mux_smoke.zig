@@ -9,6 +9,38 @@ const tcp_bt = @import("../transport/tcp_byte_transport.zig");
 
 const chainsync_proto: u16 = 2;
 
+fn printPoint(term: cbor.Term) void {
+    if (term == .array) {
+        const items = term.array;
+        if (items.len == 0) {
+            std.debug.print("point: origin\n", .{});
+            return;
+        }
+        if (items.len >= 2 and items[0] == .u64 and items[1] == .bytes) {
+            const slot = items[0].u64;
+            const hash = items[1].bytes;
+            const end = if (hash.len < 8) hash.len else 8;
+            std.debug.print(
+                "point: slot={d} hash={s}\n",
+                .{ slot, std.fmt.fmtSliceHexLower(hash[0..end]) },
+            );
+            return;
+        }
+    }
+    std.debug.print("point: (opaque)\n", .{});
+}
+
+fn printTip(term: cbor.Term) void {
+    if (term == .array) {
+        const items = term.array;
+        if (items.len >= 1 and items[0] == .u64) {
+            std.debug.print("tip: slot={d}\n", .{items[0].u64});
+            return;
+        }
+    }
+    std.debug.print("tip: (opaque)\n", .{});
+}
+
 fn doHandshake(alloc: std.mem.Allocator, bt: *bt_boundary.ByteTransport) !bool {
     var version_items = try alloc.alloc(cbor.Term, 4);
     version_items[0] = .{ .u64 = 2 };
@@ -106,6 +138,7 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
             switch (msg) {
                 .intersect_found => {
                     std.debug.print("chainsync: intersect found\n", .{});
+                    printTip(msg.intersect_found.tip);
 
                     var req_list = std.ArrayList(u8).init(alloc);
                     defer req_list.deinit();
@@ -148,8 +181,15 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
                             defer chainsync_codec.free(alloc, &next_msg);
 
                             switch (next_msg) {
-                                .roll_forward => std.debug.print("chainsync: roll forward\n", .{}),
-                                .roll_backward => std.debug.print("chainsync: roll backward\n", .{}),
+                                .roll_forward => {
+                                    std.debug.print("chainsync: roll forward\n", .{});
+                                    printTip(next_msg.roll_forward.tip);
+                                },
+                                .roll_backward => {
+                                    std.debug.print("chainsync: roll backward\n", .{});
+                                    printPoint(next_msg.roll_backward.point);
+                                    printTip(next_msg.roll_backward.tip);
+                                },
                                 else => std.debug.print("chainsync: no response\n", .{}),
                             }
                             return;
