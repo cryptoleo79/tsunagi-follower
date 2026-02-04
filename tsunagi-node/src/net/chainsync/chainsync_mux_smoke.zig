@@ -26,6 +26,13 @@ fn ensureCursorDir() !void {
     };
 }
 
+fn hexHasValue(hex: []const u8) bool {
+    for (hex) |b| {
+        if (b != '0') return true;
+    }
+    return false;
+}
+
 const HeaderCandidate = struct {
     index: usize,
     bytes: []u8,
@@ -1226,10 +1233,44 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
         return;
     }
 
-    const origin_point = cbor.Term{ .array = @constCast((&[_]cbor.Term{})[0..]) };
+    var point_items: ?[]cbor.Term = null;
+    var point_hash_bytes: ?[]u8 = null;
+    defer if (point_items) |items| alloc.free(items);
+    defer if (point_hash_bytes) |bytes| alloc.free(bytes);
+
+    const use_cursor = cursor_state.slot > 0 and hexHasValue(cursor_state.tip_hash_hex[0..]);
+    var used_cursor_point = false;
+    const point = blk: {
+        if (!use_cursor) break :blk cbor.Term{ .array = @constCast((&[_]cbor.Term{})[0..]) };
+
+        var hash_bytes: [32]u8 = undefined;
+        _ = std.fmt.hexToBytes(&hash_bytes, cursor_state.tip_hash_hex[0..]) catch break :blk cbor.Term{
+            .array = @constCast((&[_]cbor.Term{})[0..]),
+        };
+
+        const hash_copy = try alloc.dupe(u8, hash_bytes[0..]);
+        point_hash_bytes = hash_copy;
+        const items = try alloc.alloc(cbor.Term, 2);
+        point_items = items;
+        items[0] = .{ .u64 = cursor_state.slot };
+        items[1] = .{ .bytes = hash_copy };
+        used_cursor_point = true;
+        break :blk cbor.Term{ .array = items };
+    };
+
+    if (used_cursor_point and point.array.len == 2 and point.array[1] == .bytes) {
+        const hash = point.array[1].bytes;
+        std.debug.print(
+            "FindIntersect using cursor point: slot={d} hash={s}\n",
+            .{ cursor_state.slot, std.fmt.fmtSliceHexLower(hash[0..4]) },
+        );
+    } else {
+        std.debug.print("FindIntersect using origin (no cursor point)\n", .{});
+    }
+
     var points_items = try alloc.alloc(cbor.Term, 1);
     defer alloc.free(points_items);
-    points_items[0] = origin_point;
+    points_items[0] = point;
     const points = cbor.Term{ .array = points_items };
     var list = std.ArrayList(u8).init(alloc);
     defer list.deinit();
