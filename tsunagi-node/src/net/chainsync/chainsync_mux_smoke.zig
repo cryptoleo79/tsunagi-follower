@@ -1,18 +1,12 @@
 const std = @import("std");
 
 const cbor = @import("../cbor/term.zig");
-const chainsync_codec = @import("chainsync_codec.zig");
-const handshake_codec = @import("../handshake/handshake_codec.zig");
-const mux_bearer = @import("../muxwire/mux_bearer.zig");
-const bt_boundary = @import("../transport/byte_transport.zig");
-const tcp_bt = @import("../transport/tcp_byte_transport.zig");
+const follower = @import("follower.zig");
 const header_raw = @import("../ledger/header_raw.zig");
 const cursor_store = @import("../ledger/cursor.zig");
 
-const chainsync_proto: u16 = 2;
 const cursor_dir = "/home/midnight/.tsunagi";
 const cursor_path = "/home/midnight/.tsunagi/cursor.json";
-const MAX_EVENTS: ?u64 = null;
 const DEBUG_VERBOSE = false;
 
 fn vprint(comptime fmt: []const u8, args: anytype) void {
@@ -26,21 +20,9 @@ fn ensureCursorDir() !void {
     };
 }
 
-fn hexHasValue(hex: []const u8) bool {
-    for (hex) |b| {
-        if (b != '0') return true;
-    }
-    return false;
-}
-
 const HeaderCandidate = struct {
     index: usize,
     bytes: []u8,
-};
-
-const HeaderCborInfo = struct {
-    cbor_bytes: []u8,
-    prev_hash: ?[32]u8,
 };
 
 fn freeHeaderCandidates(alloc: std.mem.Allocator, candidates: []HeaderCandidate) void {
@@ -48,12 +30,6 @@ fn freeHeaderCandidates(alloc: std.mem.Allocator, candidates: []HeaderCandidate)
         alloc.free(candidate.bytes);
     }
     alloc.free(candidates);
-}
-
-fn headerHashBlake2b256(header_cbor_bytes: []const u8) [32]u8 {
-    var digest: [32]u8 = undefined;
-    std.crypto.hash.blake2.Blake2b256.hash(header_cbor_bytes, &digest, .{});
-    return digest;
 }
 
 fn freeHeaderValues(alloc: std.mem.Allocator, values: *[15]?[]u8) void {
@@ -118,7 +94,7 @@ fn captureFirstRollForward(
         .{std.fmt.fmtSliceHexLower(header_cbor_bytes)},
     );
 
-    const header_hash = headerHashBlake2b256(header_cbor_bytes);
+    const header_hash = follower.headerHashBlake2b256(header_cbor_bytes);
     std.debug.print("header_hash={s}\n", .{std.fmt.fmtSliceHexLower(&header_hash)});
     if (prev_hash) |hash| {
         std.debug.print("prev_hash={s}\n", .{std.fmt.fmtSliceHexLower(&hash)});
@@ -211,52 +187,6 @@ fn printPoint(term: cbor.Term) void {
         }
     }
     std.debug.print("point: (opaque)\n", .{});
-}
-
-fn cloneTerm(alloc: std.mem.Allocator, term: cbor.Term) !cbor.Term {
-    return switch (term) {
-        .u64 => |v| cbor.Term{ .u64 = v },
-        .i64 => |v| cbor.Term{ .i64 = v },
-        .bool => |v| cbor.Term{ .bool = v },
-        .null => cbor.Term{ .null = {} },
-        .bytes => |b| cbor.Term{ .bytes = try alloc.dupe(u8, b) },
-        .text => |t| cbor.Term{ .text = try alloc.dupe(u8, t) },
-        .array => |items| blk: {
-            var out = try alloc.alloc(cbor.Term, items.len);
-            errdefer {
-                for (out) |item| cbor.free(item, alloc);
-                alloc.free(out);
-            }
-            for (items, 0..) |item, i| {
-                out[i] = try cloneTerm(alloc, item);
-            }
-            break :blk cbor.Term{ .array = out };
-        },
-        .map_u64 => |entries| blk: {
-            var out = try alloc.alloc(cbor.MapEntry, entries.len);
-            errdefer {
-                for (out) |e| cbor.free(e.value, alloc);
-                alloc.free(out);
-            }
-            for (entries, 0..) |e, i| {
-                out[i] = .{ .key = e.key, .value = try cloneTerm(alloc, e.value) };
-            }
-            break :blk cbor.Term{ .map_u64 = out };
-        },
-        .tag => |t| blk: {
-            const value = try alloc.create(cbor.Term);
-            errdefer alloc.destroy(value);
-            value.* = try cloneTerm(alloc, t.value.*);
-            break :blk cbor.Term{ .tag = .{ .tag = t.tag, .value = value } };
-        },
-    };
-}
-
-fn storeTip(alloc: std.mem.Allocator, last_tip: *?cbor.Term, tip: cbor.Term) !void {
-    if (last_tip.*) |existing| {
-        cbor.free(existing, alloc);
-    }
-    last_tip.* = try cloneTerm(alloc, tip);
 }
 
 fn printIndent(level: usize) void {
@@ -889,54 +819,6 @@ fn printHeaderItemNested(parent: usize, index: usize, term: cbor.Term) void {
     }
 }
 
-fn extractHeaderCborInfo(alloc: std.mem.Allocator, block: cbor.Term) ?HeaderCborInfo {
-    if (block != .array) return null;
-    const items = block.array;
-    if (items.len < 2) return null;
-
-    const block_bytes = blk: {
-        if (items[1] == .bytes) break :blk items[1].bytes;
-        if (items[1] == .tag and items[1].tag.tag == 24 and items[1].tag.value.* == .bytes) {
-            break :blk items[1].tag.value.*.bytes;
-        }
-        return null;
-    };
-
-    const inner_bytes = header_raw.getTag24InnerBytes(block_bytes) orelse block_bytes;
-    var fbs = std.io.fixedBufferStream(inner_bytes);
-    const top = cbor.decode(alloc, fbs.reader()) catch return null;
-    defer cbor.free(top, alloc);
-
-    if (top != .array) return null;
-    const top_items = top.array;
-    if (top_items.len == 0 or top_items[0] != .array) return null;
-    if (top_items[0].array.len != 15) return null;
-
-    var list = std.ArrayList(u8).init(alloc);
-    errdefer list.deinit();
-    cbor.encode(top_items[0], list.writer()) catch {
-        list.deinit();
-        return null;
-    };
-    const cbor_bytes = list.toOwnedSlice() catch {
-        list.deinit();
-        return null;
-    };
-
-    var prev_hash: ?[32]u8 = null;
-    const header_items = top_items[0].array;
-    if (header_items[8] == .bytes and header_items[8].bytes.len == 32) {
-        var bytes32: [32]u8 = undefined;
-        std.mem.copyForwards(u8, bytes32[0..], header_items[8].bytes);
-        prev_hash = bytes32;
-    }
-
-    return HeaderCborInfo{
-        .cbor_bytes = cbor_bytes,
-        .prev_hash = prev_hash,
-    };
-}
-
 fn printHeaderShallow(alloc: std.mem.Allocator, term: cbor.Term, tip_hash: ?[]const u8) void {
     if (term != .array) return;
     const items = term.array;
@@ -1158,599 +1040,467 @@ fn printTip(term: cbor.Term) void {
     printTerm(term, 1);
 }
 
-fn doHandshake(alloc: std.mem.Allocator, bt: *bt_boundary.ByteTransport) !bool {
-    var version_items = try alloc.alloc(cbor.Term, 4);
-    version_items[0] = .{ .u64 = 2 };
-    version_items[1] = .{ .bool = false };
-    version_items[2] = .{ .u64 = 1 };
-    version_items[3] = .{ .bool = false };
-    const version_data = cbor.Term{ .array = version_items };
+const FollowerCtx = struct {
+    base: follower.Context,
+    alloc: std.mem.Allocator,
+    prev_candidates: ?[]HeaderCandidate = null,
+    prev_header_values: [15]?[]u8 = [_]?[]u8{null} ** 15,
+    prev_changed: [15]bool = [_]bool{false} ** 15,
+    captured_first_rollforward: bool = false,
+    prev_header_hash_opt: ?[32]u8 = null,
+    prev_header_cbor_len: ?usize = null,
+    prev_header_body_raw: ?header_raw.HeaderBodyRawSnapshot = null,
+    printed_continuity_verdict: bool = false,
+    last_dup_tip_hex: ?[8]u8 = null,
+    last_saved_tip_hex: ?[8]u8 = null,
+};
 
-    var entries = try alloc.alloc(cbor.MapEntry, 1);
-    entries[0] = .{ .key = 14, .value = version_data };
-    var propose = handshake_codec.HandshakeMsg{
-        .propose = .{ .versions = .{ .map_u64 = entries } },
-    };
-    defer handshake_codec.free(alloc, &propose);
+fn ctxFromAny(ctx_any: *anyopaque) *FollowerCtx {
+    return @as(*FollowerCtx, @ptrCast(@alignCast(ctx_any)));
+}
 
-    var payload_list = std.ArrayList(u8).init(alloc);
-    defer payload_list.deinit();
-    try handshake_codec.encodeMsg(propose, payload_list.writer());
-    const payload = try payload_list.toOwnedSlice();
-    defer alloc.free(payload);
+fn onRollForward(
+    ctx_any: *anyopaque,
+    tip_slot: u64,
+    tip_block: u64,
+    tip_hash32: [32]u8,
+    header_hash32: [32]u8,
+) !void {
+    _ = tip_slot;
+    _ = tip_block;
+    _ = tip_hash32;
+    _ = header_hash32;
 
-    try mux_bearer.sendSegment(bt, .initiator, 0, payload);
+    const ctx = ctxFromAny(ctx_any);
+    const alloc = ctx.alloc;
+    const tip = ctx.base.current_tip orelse return;
+    const block = ctx.base.current_block orelse return;
 
-    const seg = try mux_bearer.recvSegment(alloc, bt);
-    if (seg == null) return false;
-    defer alloc.free(seg.?.payload);
+    const tip_hash = getTipHash(tip);
+    var new_slot: ?u64 = null;
+    var new_block_no: ?u64 = null;
+    if (getTipSlotBlock(tip)) |tip_info| {
+        new_slot = tip_info.slot;
+        new_block_no = tip_info.block_no;
+    }
+    var new_tip_hash_hex = ctx.base.cursor.tip_hash_hex;
+    var has_tip_hash = false;
+    if (tip_hash) |hash| {
+        if (hash.len == 32) {
+            _ = try std.fmt.bufPrint(
+                &new_tip_hash_hex,
+                "{s}",
+                .{std.fmt.fmtSliceHexLower(hash)},
+            );
+            has_tip_hash = true;
+        }
+    }
+    var tip_prefix8: ?[8]u8 = null;
+    if (has_tip_hash) {
+        var prefix: [8]u8 = [_]u8{'?'} ** 8;
+        if (tip_hash) |hash| {
+            if (hash.len >= 4) {
+                _ = try std.fmt.bufPrint(
+                    &prefix,
+                    "{s}",
+                    .{std.fmt.fmtSliceHexLower(hash[0..4])},
+                );
+            }
+        }
+        tip_prefix8 = prefix;
+    }
+    if (new_slot != null and new_block_no != null and has_tip_hash) {
+        if (new_slot.? == ctx.base.cursor.slot and
+            new_block_no.? == ctx.base.cursor.block_no and
+            std.mem.eql(u8, new_tip_hash_hex[0..], ctx.base.cursor.tip_hash_hex[0..]))
+        {
+            if (tip_prefix8) |prefix| {
+                const should_log = if (ctx.last_dup_tip_hex) |last_dup|
+                    !std.mem.eql(u8, last_dup[0..], prefix[0..])
+                else
+                    true;
+                if (should_log) {
+                    std.debug.print(
+                        "ROLL FWD (duplicate) slot={d} block={d} tip={s} (no save)\n",
+                        .{ new_slot.?, new_block_no.?, prefix[0..] },
+                    );
+                    ctx.last_dup_tip_hex = prefix;
+                }
+            }
+            return;
+        }
+    }
+    if (new_slot) |slot| ctx.base.cursor.slot = slot;
+    if (new_block_no) |block_no| ctx.base.cursor.block_no = block_no;
+    if (has_tip_hash) {
+        ctx.base.cursor.tip_hash_hex = new_tip_hash_hex;
+    }
+    if (DEBUG_VERBOSE) {
+        printBlockShallow(block);
+        printBlockHash(alloc, block, tip_hash);
+    }
+    if (follower.extractHeaderCborInfo(alloc, block)) |header_info| {
+        defer alloc.free(header_info.cbor_bytes);
+        const header_hash = follower.headerHashBlake2b256(header_info.cbor_bytes);
+        _ = try std.fmt.bufPrint(
+            &ctx.base.cursor.header_hash_hex,
+            "{s}",
+            .{std.fmt.fmtSliceHexLower(&header_hash)},
+        );
+        if (!ctx.captured_first_rollforward) {
+            ctx.captured_first_rollforward = true;
+            if (DEBUG_VERBOSE) {
+                captureFirstRollForward(
+                    alloc,
+                    tip,
+                    header_info.cbor_bytes,
+                    header_info.prev_hash,
+                );
+                try writeCaptureFile(
+                    tip,
+                    header_info.cbor_bytes,
+                );
+            }
+        }
+        if (ctx.prev_header_hash_opt) |prev_hash| {
+            if (header_info.prev_hash) |next_prev_hash| {
+                const matches = std.mem.eql(u8, prev_hash[0..], next_prev_hash[0..]);
+                vprint(
+                    "header_hash == next.prev_hash ({s})\n",
+                    .{if (matches) "true" else "false"},
+                );
+            }
+        }
+        const curr_body_opt = header_raw.extractHeaderBodyRawSnapshot(
+            alloc,
+            block,
+        );
+        if (curr_body_opt) |curr_body| {
+            if (ctx.prev_header_body_raw) |prev_body| {
+                if (ctx.base.roll_forward_count == 2 and !ctx.printed_continuity_verdict) {
+                    if (DEBUG_VERBOSE) {
+                        header_raw.printHeaderBodyRawStability(prev_body, curr_body, true);
+                        printContinuityVerdict(prev_body, curr_body, true);
+                    }
+                    ctx.printed_continuity_verdict = true;
+                }
+            }
+            ctx.prev_header_body_raw = curr_body;
+            if (ctx.prev_header_hash_opt) |prev_hash| {
+                var match_any = false;
+                const matches_f3 = std.mem.eql(
+                    u8,
+                    prev_hash[0..],
+                    curr_body.f3_bytes32[0..],
+                );
+                vprint(
+                    "prev_header_hash == curr.f3_bytes32 -> {s}\n",
+                    .{if (matches_f3) "true" else "false"},
+                );
+                if (matches_f3) {
+                    vprint("MATCH FIELD: f3\n", .{});
+                    match_any = true;
+                }
 
-    var fbs = std.io.fixedBufferStream(seg.?.payload);
-    var msg = handshake_codec.decodeMsg(alloc, fbs.reader()) catch return false;
-    defer handshake_codec.free(alloc, &msg);
+                const matches_f4 = std.mem.eql(
+                    u8,
+                    prev_hash[0..],
+                    curr_body.f4_bytes32[0..],
+                );
+                vprint(
+                    "prev_header_hash == curr.f4_bytes32 -> {s}\n",
+                    .{if (matches_f4) "true" else "false"},
+                );
+                if (matches_f4) {
+                    vprint("MATCH FIELD: f4\n", .{});
+                    match_any = true;
+                }
 
-    return msg == .accept;
+                const matches_f8 = std.mem.eql(
+                    u8,
+                    prev_hash[0..],
+                    curr_body.f8_bytes32[0..],
+                );
+                vprint(
+                    "prev_header_hash == curr.f8_bytes32 -> {s}\n",
+                    .{if (matches_f8) "true" else "false"},
+                );
+                if (matches_f8) {
+                    vprint("MATCH FIELD: f8\n", .{});
+                    match_any = true;
+                }
+
+                const matches_f9 = std.mem.eql(
+                    u8,
+                    prev_hash[0..],
+                    curr_body.f9_bytes32[0..],
+                );
+                vprint(
+                    "prev_header_hash == curr.f9_bytes32 -> {s}\n",
+                    .{if (matches_f9) "true" else "false"},
+                );
+                if (matches_f9) {
+                    vprint("MATCH FIELD: f9\n", .{});
+                    match_any = true;
+                }
+
+                if (curr_body.f2 == .bytes32) {
+                    const matches_f2 = std.mem.eql(
+                        u8,
+                        prev_hash[0..],
+                        curr_body.f2.bytes32[0..],
+                    );
+                    vprint(
+                        "prev_header_hash == curr.f2 -> {s}\n",
+                        .{if (matches_f2) "true" else "false"},
+                    );
+                    if (matches_f2) {
+                        vprint("MATCH FIELD: f2\n", .{});
+                        match_any = true;
+                    }
+                }
+
+                vprint(
+                    "curr_prev_hash matches prev_header_hash={s}\n",
+                    .{if (match_any) "true" else "false"},
+                );
+            }
+        } else if (ctx.prev_header_body_raw != null and DEBUG_VERBOSE) {
+            std.debug.print("consensus continuity: BROKEN\n", .{});
+        }
+        ctx.prev_header_hash_opt = header_hash;
+        ctx.prev_header_cbor_len = header_info.cbor_bytes.len;
+    }
+    const curr_candidates = try collectHeaderCandidates(
+        alloc,
+        block,
+    );
+    if (ctx.prev_header_hash_opt) |prev_hash| {
+        for (curr_candidates) |curr_item| {
+            if (std.mem.eql(u8, curr_item.bytes, prev_hash[0..])) {
+                vprint(
+                    "consensus prev-hash field: header[{d}] matches prev_header_hash\n",
+                    .{curr_item.index},
+                );
+            }
+        }
+    }
+    var curr_changed: [15]bool = [_]bool{false} ** 15;
+    var curr_present: [15]bool = [_]bool{false} ** 15;
+    for (curr_candidates) |curr_item| {
+        if (curr_item.index < 15) {
+            curr_present[curr_item.index] = true;
+            if (ctx.prev_header_values[curr_item.index]) |prev_bytes| {
+                curr_changed[curr_item.index] =
+                    !std.mem.eql(u8, prev_bytes, curr_item.bytes);
+            } else {
+                curr_changed[curr_item.index] = true;
+            }
+        }
+    }
+    for (curr_candidates) |curr_item| {
+        if (curr_item.index < 15) {
+            if (ctx.prev_header_values[curr_item.index]) |prev_bytes| {
+                alloc.free(prev_bytes);
+            }
+            ctx.prev_header_values[curr_item.index] = try alloc.dupe(
+                u8,
+                curr_item.bytes,
+            );
+        }
+    }
+    var idx: usize = 0;
+    while (idx < ctx.prev_header_values.len) : (idx += 1) {
+        if (!curr_present[idx]) {
+            if (ctx.prev_header_values[idx]) |prev_bytes| {
+                alloc.free(prev_bytes);
+            }
+            ctx.prev_header_values[idx] = null;
+        }
+    }
+    if (DEBUG_VERBOSE) printHeader32List("curr header32:", curr_candidates);
+    if (ctx.prev_candidates) |prev| {
+        if (DEBUG_VERBOSE) printHeader32List("prev header32:", prev);
+        for (prev) |prev_item| {
+            for (curr_candidates) |curr_item| {
+                if (!ctx.prev_changed[prev_item.index] or
+                    !curr_changed[curr_item.index])
+                {
+                    continue;
+                }
+                if (std.mem.eql(u8, prev_item.bytes, curr_item.bytes)) {
+                    vprint(
+                        "link candidate: prev.header[{d}] -> curr.header[{d}]\n",
+                        .{ prev_item.index, curr_item.index },
+                    );
+                }
+                if (std.mem.eql(u8, prev_item.bytes, curr_item.bytes)) {
+                    vprint(
+                        "match32: prev.header[{d}] == curr.header[{d}]\n",
+                        .{ prev_item.index, curr_item.index },
+                    );
+                    vprint(
+                        "prev.header[{d}] == curr.header[{d}] (possible prev-hash link)\n",
+                        .{ prev_item.index, curr_item.index },
+                    );
+                    vprint(
+                        "matching indices: prev={d} curr={d}\n",
+                        .{ prev_item.index, curr_item.index },
+                    );
+                }
+            }
+        }
+        freeHeaderCandidates(alloc, prev);
+    }
+    ctx.prev_candidates = curr_candidates;
+    ctx.prev_changed = curr_changed;
+    if (DEBUG_VERBOSE) printTip(tip);
+    ctx.base.cursor.roll_forward_count += 1;
+    ctx.base.cursor.updated_unix = std.time.timestamp();
+    try cursor_store.save(ctx.base.cursor, cursor_path);
+    std.debug.print("CURSOR saved {s}\n", .{cursor_path});
+    var tip_prefix: [8]u8 = [_]u8{'?'} ** 8;
+    if (tip_prefix8) |prefix| {
+        tip_prefix = prefix;
+    }
+    ctx.last_saved_tip_hex = tip_prefix;
+    ctx.last_dup_tip_hex = null;
+    std.debug.print(
+        "ROLL FWD slot={d} block={d} tip={s} fwd={d} back={d}\n",
+        .{
+            ctx.base.cursor.slot,
+            ctx.base.cursor.block_no,
+            tip_prefix[0..],
+            ctx.base.cursor.roll_forward_count,
+            ctx.base.cursor.roll_backward_count,
+        },
+    );
+}
+
+fn onRollBackward(
+    ctx_any: *anyopaque,
+    tip_slot: u64,
+    tip_block: u64,
+    tip_hash32: [32]u8,
+) !void {
+    _ = tip_slot;
+    _ = tip_block;
+    _ = tip_hash32;
+
+    const ctx = ctxFromAny(ctx_any);
+    const tip = ctx.base.current_tip orelse return;
+
+    if (DEBUG_VERBOSE) {
+        if (ctx.base.current_point) |point| {
+            printPoint(point);
+        }
+        printTip(tip);
+    }
+    ctx.base.cursor.roll_backward_count += 1;
+    ctx.base.cursor.updated_unix = std.time.timestamp();
+    try cursor_store.save(ctx.base.cursor, cursor_path);
+    std.debug.print("CURSOR saved {s}\n", .{cursor_path});
+    const tip_hash = getTipHash(tip);
+    if (getTipSlotBlock(tip)) |tip_info| {
+        ctx.base.cursor.slot = tip_info.slot;
+        ctx.base.cursor.block_no = tip_info.block_no;
+    }
+    var tip_prefix: [8]u8 = [_]u8{'?'} ** 8;
+    if (tip_hash) |hash| {
+        if (hash.len >= 4) {
+            _ = try std.fmt.bufPrint(
+                &tip_prefix,
+                "{s}",
+                .{std.fmt.fmtSliceHexLower(hash[0..4])},
+            );
+        }
+    }
+    std.debug.print(
+        "ROLL BACK slot={d} block={d} tip={s} fwd={d} back={d}\n",
+        .{
+            ctx.base.cursor.slot,
+            ctx.base.cursor.block_no,
+            tip_prefix[0..],
+            ctx.base.cursor.roll_forward_count,
+            ctx.base.cursor.roll_backward_count,
+        },
+    );
+}
+
+fn onStatus(
+    ctx_any: *anyopaque,
+    slot: u64,
+    block: u64,
+    fwd: u64,
+    back: u64,
+    tip_prefix8: [8]u8,
+) void {
+    _ = ctx_any;
+    std.debug.print(
+        "STATUS slot={d} block={d} fwd={d} back={d} tip={s}\n",
+        .{ slot, block, fwd, back, tip_prefix8[0..] },
+    );
+}
+
+fn onShutdown(ctx_any: *anyopaque) void {
+    const ctx = ctxFromAny(ctx_any);
+    std.debug.print(
+        "Final cursor: slot={d} block={d} fwd={d} back={d} tip={s}\n",
+        .{
+            ctx.base.cursor.slot,
+            ctx.base.cursor.block_no,
+            ctx.base.cursor.roll_forward_count,
+            ctx.base.cursor.roll_backward_count,
+            ctx.base.cursor.tip_hash_hex[0..8],
+        },
+    );
 }
 
 pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
-    var bt = try tcp_bt.connect(alloc, host, port);
-    defer bt.deinit();
-    var last_tip: ?cbor.Term = null;
-    defer if (last_tip) |tip| {
-        cbor.free(tip, alloc);
+    var ctx = FollowerCtx{
+        .base = .{
+            .cursor = try cursor_store.loadOrInit(alloc, cursor_path),
+            .current_tip = null,
+            .current_block = null,
+            .current_point = null,
+            .roll_forward_count = 0,
+            .debug_verbose = DEBUG_VERBOSE,
+        },
+        .alloc = alloc,
+        .prev_candidates = null,
+        .prev_header_values = [_]?[]u8{null} ** 15,
+        .prev_changed = [_]bool{false} ** 15,
+        .captured_first_rollforward = false,
+        .prev_header_hash_opt = null,
+        .prev_header_cbor_len = null,
+        .prev_header_body_raw = null,
+        .printed_continuity_verdict = false,
+        .last_dup_tip_hex = null,
+        .last_saved_tip_hex = null,
     };
-    var prev_candidates: ?[]HeaderCandidate = null;
-    defer if (prev_candidates) |candidates| freeHeaderCandidates(alloc, candidates);
-    var prev_header_values: [15]?[]u8 = [_]?[]u8{null} ** 15;
-    defer freeHeaderValues(alloc, &prev_header_values);
-    var prev_changed: [15]bool = [_]bool{false} ** 15;
-    var captured_first_rollforward = false;
-    var prev_header_hash_opt: ?[32]u8 = null;
-    var prev_header_cbor_len: ?usize = null;
-    var prev_header_body_raw: ?header_raw.HeaderBodyRawSnapshot = null;
-    var printed_continuity_verdict = false;
-    var cursor_state = try cursor_store.loadOrInit(alloc, cursor_path);
+    defer {
+        if (ctx.prev_candidates) |candidates| freeHeaderCandidates(alloc, candidates);
+        freeHeaderValues(alloc, &ctx.prev_header_values);
+    }
+
     try ensureCursorDir();
-    var last_dup_tip_hex: ?[8]u8 = null;
-    var last_saved_tip_hex: ?[8]u8 = null;
 
     vprint(
         "cursor loaded: slot={d} block_no={d} fwd={d} back={d}\n",
         .{
-            cursor_state.slot,
-            cursor_state.block_no,
-            cursor_state.roll_forward_count,
-            cursor_state.roll_backward_count,
+            ctx.base.cursor.slot,
+            ctx.base.cursor.block_no,
+            ctx.base.cursor.roll_forward_count,
+            ctx.base.cursor.roll_backward_count,
         },
     );
 
-    const timeout_ms: u32 = 10_000;
-    tcp_bt.setReadTimeout(&bt, timeout_ms) catch {};
-
-    const accepted = try doHandshake(alloc, &bt);
-    if (!accepted) {
-        vprint("chainsync: no response\n", .{});
-        return;
-    }
-
-    var point_items: ?[]cbor.Term = null;
-    var point_hash_bytes: ?[]u8 = null;
-    defer if (point_items) |items| alloc.free(items);
-    defer if (point_hash_bytes) |bytes| alloc.free(bytes);
-
-    const use_cursor = cursor_state.slot > 0 and hexHasValue(cursor_state.tip_hash_hex[0..]);
-    var used_cursor_point = false;
-    const point = blk: {
-        if (!use_cursor) break :blk cbor.Term{ .array = @constCast((&[_]cbor.Term{})[0..]) };
-
-        var hash_bytes: [32]u8 = undefined;
-        _ = std.fmt.hexToBytes(&hash_bytes, cursor_state.tip_hash_hex[0..]) catch break :blk cbor.Term{
-            .array = @constCast((&[_]cbor.Term{})[0..]),
-        };
-
-        const hash_copy = try alloc.dupe(u8, hash_bytes[0..]);
-        point_hash_bytes = hash_copy;
-        const items = try alloc.alloc(cbor.Term, 2);
-        point_items = items;
-        items[0] = .{ .u64 = cursor_state.slot };
-        items[1] = .{ .bytes = hash_copy };
-        used_cursor_point = true;
-        break :blk cbor.Term{ .array = items };
+    const callbacks = follower.Callbacks{
+        .on_roll_forward = onRollForward,
+        .on_roll_backward = onRollBackward,
+        .on_status = onStatus,
+        .on_shutdown = onShutdown,
     };
 
-    if (used_cursor_point and point.array.len == 2 and point.array[1] == .bytes) {
-        const hash = point.array[1].bytes;
-        std.debug.print(
-            "FindIntersect using cursor point: slot={d} hash={s}\n",
-            .{ cursor_state.slot, std.fmt.fmtSliceHexLower(hash[0..4]) },
-        );
-    } else {
-        std.debug.print("FindIntersect using origin (no cursor point)\n", .{});
-    }
-
-    var points_items = try alloc.alloc(cbor.Term, 1);
-    defer alloc.free(points_items);
-    points_items[0] = point;
-    const points = cbor.Term{ .array = points_items };
-    var list = std.ArrayList(u8).init(alloc);
-    defer list.deinit();
-    try chainsync_codec.encodeFindIntersect(list.writer(), points);
-    const msg_bytes = try list.toOwnedSlice();
-    defer alloc.free(msg_bytes);
-
-    try mux_bearer.sendSegment(&bt, .responder, chainsync_proto, msg_bytes);
-    vprint("chainsync: sent FindIntersect ({d} bytes)\n", .{msg_bytes.len});
-
-    const deadline_ms: i64 = std.time.milliTimestamp() + timeout_ms;
-
-    while (true) {
-        const now_ms = std.time.milliTimestamp();
-        if (now_ms >= deadline_ms) {
-            vprint("chainsync: timed out after 10000ms\n", .{});
-            return;
-        }
-
-        const remaining_ms: u32 = @intCast(deadline_ms - now_ms);
-        tcp_bt.setReadTimeout(&bt, remaining_ms) catch {};
-
-        const seg = mux_bearer.recvSegmentWithTimeout(alloc, &bt) catch |err| switch (err) {
-            error.TimedOut => continue,
-            else => return err,
-        };
-        if (seg == null) {
-            vprint("peer closed\n", .{});
-            return;
-        }
-        defer alloc.free(seg.?.payload);
-
-        const hdr = seg.?.hdr;
-        vprint(
-            "mux: rx hdr dir={s} proto={d} len={d}\n",
-            .{ @tagName(hdr.dir), hdr.proto, hdr.len },
-        );
-
-        if (hdr.proto == chainsync_proto) {
-            var fbs = std.io.fixedBufferStream(seg.?.payload);
-            var msg = try chainsync_codec.decodeResponse(alloc, fbs.reader());
-            defer chainsync_codec.free(alloc, &msg);
-
-            switch (msg) {
-                .intersect_found => {
-                    vprint("chainsync: intersect found\n", .{});
-                    if (DEBUG_VERBOSE) printTip(msg.intersect_found.tip);
-                    try storeTip(alloc, &last_tip, msg.intersect_found.tip);
-
-                    var req_list = std.ArrayList(u8).init(alloc);
-                    defer req_list.deinit();
-                    try chainsync_codec.encodeRequestNext(req_list.writer());
-                    const req_bytes = try req_list.toOwnedSlice();
-                    defer alloc.free(req_bytes);
-
-                    var steps: u64 = 0;
-                    var roll_forward_count: u64 = 0;
-                    var roll_event_count: u64 = 0;
-                    while (true) : (steps += 1) {
-                        try mux_bearer.sendSegment(&bt, .responder, chainsync_proto, req_bytes);
-
-                        const req_deadline_ms: i64 = std.time.milliTimestamp() + timeout_ms;
-                        var awaiting_reply = true;
-                        while (awaiting_reply) {
-                            const req_now_ms = std.time.milliTimestamp();
-                            if (req_now_ms >= req_deadline_ms) {
-                                vprint("chainsync: timed out after 10000ms\n", .{});
-                                return;
-                            }
-
-                            const req_remaining_ms: u32 = @intCast(req_deadline_ms - req_now_ms);
-                            tcp_bt.setReadTimeout(&bt, req_remaining_ms) catch {};
-
-                            const next_seg = mux_bearer.recvSegmentWithTimeout(alloc, &bt) catch |err| switch (err) {
-                                error.TimedOut => continue,
-                                else => return err,
-                            };
-                            if (next_seg == null) {
-                                vprint("peer closed\n", .{});
-                                return;
-                            }
-                            defer alloc.free(next_seg.?.payload);
-
-                            const next_hdr = next_seg.?.hdr;
-                            vprint(
-                                "mux: rx hdr dir={s} proto={d} len={d}\n",
-                                .{ @tagName(next_hdr.dir), next_hdr.proto, next_hdr.len },
-                            );
-
-                            if (next_hdr.proto == chainsync_proto) {
-                                var next_fbs = std.io.fixedBufferStream(next_seg.?.payload);
-                                var next_msg = try chainsync_codec.decodeResponse(alloc, next_fbs.reader());
-                                defer chainsync_codec.free(alloc, &next_msg);
-
-                                switch (next_msg) {
-                                    .await_reply => {
-                                        vprint("chainsync[{d}]: await reply\n", .{steps});
-                                        awaiting_reply = true;
-                                    },
-                                    .roll_forward => {
-                                        vprint("chainsync[{d}]: roll forward\n", .{steps});
-                                        const tip_hash = getTipHash(next_msg.roll_forward.tip);
-                                        var new_slot: ?u64 = null;
-                                        var new_block_no: ?u64 = null;
-                                        if (getTipSlotBlock(next_msg.roll_forward.tip)) |tip_info| {
-                                            new_slot = tip_info.slot;
-                                            new_block_no = tip_info.block_no;
-                                        }
-                                        var new_tip_hash_hex = cursor_state.tip_hash_hex;
-                                        var has_tip_hash = false;
-                                        if (tip_hash) |hash| {
-                                            if (hash.len == 32) {
-                                                _ = try std.fmt.bufPrint(
-                                                    &new_tip_hash_hex,
-                                                    "{s}",
-                                                    .{std.fmt.fmtSliceHexLower(hash)},
-                                                );
-                                                has_tip_hash = true;
-                                            }
-                                        }
-                                        var tip_prefix8: ?[8]u8 = null;
-                                        if (has_tip_hash) {
-                                            var prefix: [8]u8 = [_]u8{'?'} ** 8;
-                                            if (tip_hash) |hash| {
-                                                if (hash.len >= 4) {
-                                                    _ = try std.fmt.bufPrint(
-                                                        &prefix,
-                                                        "{s}",
-                                                        .{std.fmt.fmtSliceHexLower(hash[0..4])},
-                                                    );
-                                                }
-                                            }
-                                            tip_prefix8 = prefix;
-                                        }
-                                        if (new_slot != null and new_block_no != null and has_tip_hash) {
-                                            if (new_slot.? == cursor_state.slot and
-                                                new_block_no.? == cursor_state.block_no and
-                                                std.mem.eql(u8, new_tip_hash_hex[0..], cursor_state.tip_hash_hex[0..]))
-                                            {
-                                                if (tip_prefix8) |prefix| {
-                                                    const should_log = if (last_dup_tip_hex) |last_dup|
-                                                        !std.mem.eql(u8, last_dup[0..], prefix[0..])
-                                                    else
-                                                        true;
-                                                    if (should_log) {
-                                                        std.debug.print(
-                                                            "ROLL FWD (duplicate) slot={d} block={d} tip={s} (no save)\n",
-                                                            .{ new_slot.?, new_block_no.?, prefix[0..] },
-                                                        );
-                                                        last_dup_tip_hex = prefix;
-                                                    }
-                                                }
-                                                awaiting_reply = false;
-                                                continue;
-                                            }
-                                        }
-                                        if (new_slot) |slot| cursor_state.slot = slot;
-                                        if (new_block_no) |block_no| cursor_state.block_no = block_no;
-                                        if (has_tip_hash) {
-                                            cursor_state.tip_hash_hex = new_tip_hash_hex;
-                                        }
-                                        roll_forward_count += 1;
-                                        if (DEBUG_VERBOSE) {
-                                            printBlockShallow(next_msg.roll_forward.block);
-                                            printBlockHash(alloc, next_msg.roll_forward.block, tip_hash);
-                                        }
-                                        if (extractHeaderCborInfo(alloc, next_msg.roll_forward.block)) |header_info| {
-                                            defer alloc.free(header_info.cbor_bytes);
-                                            const header_hash = headerHashBlake2b256(header_info.cbor_bytes);
-                                            _ = try std.fmt.bufPrint(
-                                                &cursor_state.header_hash_hex,
-                                                "{s}",
-                                                .{std.fmt.fmtSliceHexLower(&header_hash)},
-                                            );
-                                            if (!captured_first_rollforward) {
-                                                captured_first_rollforward = true;
-                                                if (DEBUG_VERBOSE) {
-                                                    captureFirstRollForward(
-                                                        alloc,
-                                                        next_msg.roll_forward.tip,
-                                                        header_info.cbor_bytes,
-                                                        header_info.prev_hash,
-                                                    );
-                                                    try writeCaptureFile(
-                                                        next_msg.roll_forward.tip,
-                                                        header_info.cbor_bytes,
-                                                    );
-                                                }
-                                            }
-                                            if (prev_header_hash_opt) |prev_hash| {
-                                                if (header_info.prev_hash) |next_prev_hash| {
-                                                    const matches = std.mem.eql(u8, prev_hash[0..], next_prev_hash[0..]);
-                                                    vprint(
-                                                        "header_hash == next.prev_hash ({s})\n",
-                                                        .{if (matches) "true" else "false"},
-                                                    );
-                                                }
-                                            }
-                                            const curr_body_opt = header_raw.extractHeaderBodyRawSnapshot(
-                                                alloc,
-                                                next_msg.roll_forward.block,
-                                            );
-                                            if (curr_body_opt) |curr_body| {
-                                                if (prev_header_body_raw) |prev_body| {
-                                                    if (roll_forward_count == 2 and !printed_continuity_verdict) {
-                                                        if (DEBUG_VERBOSE) {
-                                                            header_raw.printHeaderBodyRawStability(prev_body, curr_body, true);
-                                                            printContinuityVerdict(prev_body, curr_body, true);
-                                                        }
-                                                        printed_continuity_verdict = true;
-                                                    }
-                                                }
-                                                prev_header_body_raw = curr_body;
-                                                if (prev_header_hash_opt) |prev_hash| {
-                                                    var match_any = false;
-                                                    const matches_f3 = std.mem.eql(
-                                                        u8,
-                                                        prev_hash[0..],
-                                                        curr_body.f3_bytes32[0..],
-                                                    );
-                                                    vprint(
-                                                        "prev_header_hash == curr.f3_bytes32 -> {s}\n",
-                                                        .{if (matches_f3) "true" else "false"},
-                                                    );
-                                                    if (matches_f3) {
-                                                        vprint("MATCH FIELD: f3\n", .{});
-                                                        match_any = true;
-                                                    }
-
-                                                    const matches_f4 = std.mem.eql(
-                                                        u8,
-                                                        prev_hash[0..],
-                                                        curr_body.f4_bytes32[0..],
-                                                    );
-                                                    vprint(
-                                                        "prev_header_hash == curr.f4_bytes32 -> {s}\n",
-                                                        .{if (matches_f4) "true" else "false"},
-                                                    );
-                                                    if (matches_f4) {
-                                                        vprint("MATCH FIELD: f4\n", .{});
-                                                        match_any = true;
-                                                    }
-
-                                                    const matches_f8 = std.mem.eql(
-                                                        u8,
-                                                        prev_hash[0..],
-                                                        curr_body.f8_bytes32[0..],
-                                                    );
-                                                    vprint(
-                                                        "prev_header_hash == curr.f8_bytes32 -> {s}\n",
-                                                        .{if (matches_f8) "true" else "false"},
-                                                    );
-                                                    if (matches_f8) {
-                                                        vprint("MATCH FIELD: f8\n", .{});
-                                                        match_any = true;
-                                                    }
-
-                                                    const matches_f9 = std.mem.eql(
-                                                        u8,
-                                                        prev_hash[0..],
-                                                        curr_body.f9_bytes32[0..],
-                                                    );
-                                                    vprint(
-                                                        "prev_header_hash == curr.f9_bytes32 -> {s}\n",
-                                                        .{if (matches_f9) "true" else "false"},
-                                                    );
-                                                    if (matches_f9) {
-                                                        vprint("MATCH FIELD: f9\n", .{});
-                                                        match_any = true;
-                                                    }
-
-                                                    if (curr_body.f2 == .bytes32) {
-                                                        const matches_f2 = std.mem.eql(
-                                                            u8,
-                                                            prev_hash[0..],
-                                                            curr_body.f2.bytes32[0..],
-                                                        );
-                                                        vprint(
-                                                            "prev_header_hash == curr.f2 -> {s}\n",
-                                                            .{if (matches_f2) "true" else "false"},
-                                                        );
-                                                        if (matches_f2) {
-                                                            vprint("MATCH FIELD: f2\n", .{});
-                                                            match_any = true;
-                                                        }
-                                                    }
-
-                                                    vprint(
-                                                        "curr_prev_hash matches prev_header_hash={s}\n",
-                                                        .{if (match_any) "true" else "false"},
-                                                    );
-                                                }
-                                            } else if (prev_header_body_raw != null and DEBUG_VERBOSE) {
-                                                std.debug.print("consensus continuity: BROKEN\n", .{});
-                                            }
-                                            prev_header_hash_opt = header_hash;
-                                            prev_header_cbor_len = header_info.cbor_bytes.len;
-                                        }
-                                        const curr_candidates = try collectHeaderCandidates(
-                                            alloc,
-                                            next_msg.roll_forward.block,
-                                        );
-                                        if (prev_header_hash_opt) |prev_hash| {
-                                            for (curr_candidates) |curr_item| {
-                                                if (std.mem.eql(u8, curr_item.bytes, prev_hash[0..])) {
-                                                    vprint(
-                                                        "consensus prev-hash field: header[{d}] matches prev_header_hash\n",
-                                                        .{curr_item.index},
-                                                    );
-                                                }
-                                            }
-                                        }
-                                        var curr_changed: [15]bool = [_]bool{false} ** 15;
-                                        var curr_present: [15]bool = [_]bool{false} ** 15;
-                                        for (curr_candidates) |curr_item| {
-                                            if (curr_item.index < 15) {
-                                                curr_present[curr_item.index] = true;
-                                                if (prev_header_values[curr_item.index]) |prev_bytes| {
-                                                    curr_changed[curr_item.index] =
-                                                        !std.mem.eql(u8, prev_bytes, curr_item.bytes);
-                                                } else {
-                                                    curr_changed[curr_item.index] = true;
-                                                }
-                                            }
-                                        }
-                                        for (curr_candidates) |curr_item| {
-                                            if (curr_item.index < 15) {
-                                                if (prev_header_values[curr_item.index]) |prev_bytes| {
-                                                    alloc.free(prev_bytes);
-                                                }
-                                                prev_header_values[curr_item.index] = try alloc.dupe(
-                                                    u8,
-                                                    curr_item.bytes,
-                                                );
-                                            }
-                                        }
-                                        var idx: usize = 0;
-                                        while (idx < prev_header_values.len) : (idx += 1) {
-                                            if (!curr_present[idx]) {
-                                                if (prev_header_values[idx]) |prev_bytes| {
-                                                    alloc.free(prev_bytes);
-                                                }
-                                                prev_header_values[idx] = null;
-                                            }
-                                        }
-                                        if (DEBUG_VERBOSE) printHeader32List("curr header32:", curr_candidates);
-                                        if (prev_candidates) |prev| {
-                                            if (DEBUG_VERBOSE) printHeader32List("prev header32:", prev);
-                                            for (prev) |prev_item| {
-                                                for (curr_candidates) |curr_item| {
-                                                    if (!prev_changed[prev_item.index] or
-                                                        !curr_changed[curr_item.index])
-                                                    {
-                                                        continue;
-                                                    }
-                                                    if (std.mem.eql(u8, prev_item.bytes, curr_item.bytes)) {
-                                                        vprint(
-                                                            "link candidate: prev.header[{d}] -> curr.header[{d}]\n",
-                                                            .{ prev_item.index, curr_item.index },
-                                                        );
-                                                    }
-                                                    if (std.mem.eql(u8, prev_item.bytes, curr_item.bytes)) {
-                                                        vprint(
-                                                            "match32: prev.header[{d}] == curr.header[{d}]\n",
-                                                            .{ prev_item.index, curr_item.index },
-                                                        );
-                                                        vprint(
-                                                            "prev.header[{d}] == curr.header[{d}] (possible prev-hash link)\n",
-                                                            .{ prev_item.index, curr_item.index },
-                                                        );
-                                                        vprint(
-                                                            "matching indices: prev={d} curr={d}\n",
-                                                            .{ prev_item.index, curr_item.index },
-                                                        );
-                                                    }
-                                                }
-                                            }
-                                            freeHeaderCandidates(alloc, prev);
-                                        }
-                                        prev_candidates = curr_candidates;
-                                        prev_changed = curr_changed;
-                                        if (DEBUG_VERBOSE) printTip(next_msg.roll_forward.tip);
-                                        try storeTip(alloc, &last_tip, next_msg.roll_forward.tip);
-                                        cursor_state.roll_forward_count += 1;
-                                        cursor_state.updated_unix = std.time.timestamp();
-                                        try cursor_store.save(cursor_state, cursor_path);
-                                        std.debug.print("CURSOR saved {s}\n", .{cursor_path});
-                                        roll_event_count += 1;
-                                        if (MAX_EVENTS) |max_events| {
-                                            if (roll_event_count >= max_events) return;
-                                        }
-                                        var tip_prefix: [8]u8 = [_]u8{'?'} ** 8;
-                                        if (tip_prefix8) |prefix| {
-                                            tip_prefix = prefix;
-                                        }
-                                        last_saved_tip_hex = tip_prefix;
-                                        last_dup_tip_hex = null;
-                                        std.debug.print(
-                                            "ROLL FWD slot={d} block={d} tip={s} fwd={d} back={d}\n",
-                                            .{
-                                                cursor_state.slot,
-                                                cursor_state.block_no,
-                                                tip_prefix[0..],
-                                                cursor_state.roll_forward_count,
-                                                cursor_state.roll_backward_count,
-                                            },
-                                        );
-                                        awaiting_reply = false;
-                                    },
-                                    .roll_backward => {
-                                        vprint("chainsync[{d}]: roll backward\n", .{steps});
-                                        if (DEBUG_VERBOSE) {
-                                            printPoint(next_msg.roll_backward.point);
-                                            printTip(next_msg.roll_backward.tip);
-                                        }
-                                        try storeTip(alloc, &last_tip, next_msg.roll_backward.tip);
-                                        cursor_state.roll_backward_count += 1;
-                                        cursor_state.updated_unix = std.time.timestamp();
-                                        try cursor_store.save(cursor_state, cursor_path);
-                                        std.debug.print("CURSOR saved {s}\n", .{cursor_path});
-                                        roll_event_count += 1;
-                                        if (MAX_EVENTS) |max_events| {
-                                            if (roll_event_count >= max_events) return;
-                                        }
-                                        const tip_hash = getTipHash(next_msg.roll_backward.tip);
-                                        if (getTipSlotBlock(next_msg.roll_backward.tip)) |tip_info| {
-                                            cursor_state.slot = tip_info.slot;
-                                            cursor_state.block_no = tip_info.block_no;
-                                        }
-                                        var tip_prefix: [8]u8 = [_]u8{'?'} ** 8;
-                                        if (tip_hash) |hash| {
-                                            if (hash.len >= 4) {
-                                                _ = try std.fmt.bufPrint(
-                                                    &tip_prefix,
-                                                    "{s}",
-                                                    .{std.fmt.fmtSliceHexLower(hash[0..4])},
-                                                );
-                                            }
-                                        }
-                                        std.debug.print(
-                                            "ROLL BACK slot={d} block={d} tip={s} fwd={d} back={d}\n",
-                                            .{
-                                                cursor_state.slot,
-                                                cursor_state.block_no,
-                                                tip_prefix[0..],
-                                                cursor_state.roll_forward_count,
-                                                cursor_state.roll_backward_count,
-                                            },
-                                        );
-                                        awaiting_reply = false;
-                                    },
-                                    else => {
-                                        vprint("chainsync[{d}]: no response\n", .{steps});
-                                        awaiting_reply = false;
-                                    },
-                                }
-                            } else if (next_hdr.proto == 8) {
-                                vprint("keepalive: rx (ignored)\n", .{});
-                                continue;
-                            } else {
-                                vprint("mux: rx unexpected proto={d}\n", .{next_hdr.proto});
-                                continue;
-                            }
-                        }
-                    }
-                    return;
-                },
-                .intersect_not_found => {
-                    vprint("chainsync: intersect not found\n", .{});
-                    return;
-                },
-                else => vprint("chainsync: no response\n", .{}),
-            }
-            return;
-        } else if (hdr.proto == 8) {
-            vprint("keepalive: rx (ignored)\n", .{});
-            continue;
-        } else {
-            vprint("mux: rx unexpected proto={d}\n", .{hdr.proto});
-            continue;
-        }
-    }
+    try follower.run(alloc, host, port, callbacks, &ctx);
 }
