@@ -9,6 +9,122 @@ const tcp_bt = @import("../transport/tcp_byte_transport.zig");
 
 const chainsync_proto: u16 = 2;
 
+const HeaderCandidate = struct {
+    index: usize,
+    bytes: []u8,
+};
+
+fn freeHeaderCandidates(alloc: std.mem.Allocator, candidates: []HeaderCandidate) void {
+    for (candidates) |candidate| {
+        alloc.free(candidate.bytes);
+    }
+    alloc.free(candidates);
+}
+
+fn getTag24InnerBytes(bytes: []const u8) ?[]const u8 {
+    if (bytes.len == 0) return null;
+    if ((bytes[0] >> 5) != 6) return null;
+
+    var index: usize = 1;
+    const ai: u8 = bytes[0] & 0x1f;
+    var tag: u32 = 0;
+    switch (ai) {
+        0...23 => tag = ai,
+        24 => {
+            if (index + 1 > bytes.len) return null;
+            tag = bytes[index];
+            index += 1;
+        },
+        25 => {
+            if (index + 2 > bytes.len) return null;
+            tag = (@as(u32, bytes[index]) << 8) | bytes[index + 1];
+            index += 2;
+        },
+        26 => {
+            if (index + 4 > bytes.len) return null;
+            tag = (@as(u32, bytes[index]) << 24) |
+                (@as(u32, bytes[index + 1]) << 16) |
+                (@as(u32, bytes[index + 2]) << 8) |
+                bytes[index + 3];
+            index += 4;
+        },
+        else => return null,
+    }
+    if (tag != 24) return null;
+    if (index >= bytes.len) return null;
+
+    const item_head = bytes[index];
+    if ((item_head >> 5) != 2) return null;
+    index += 1;
+
+    const item_ai: u8 = item_head & 0x1f;
+    var len: usize = 0;
+    switch (item_ai) {
+        0...23 => len = item_ai,
+        24 => {
+            if (index + 1 > bytes.len) return null;
+            len = bytes[index];
+            index += 1;
+        },
+        25 => {
+            if (index + 2 > bytes.len) return null;
+            len = (@as(usize, bytes[index]) << 8) | bytes[index + 1];
+            index += 2;
+        },
+        26 => {
+            if (index + 4 > bytes.len) return null;
+            len = (@as(usize, bytes[index]) << 24) |
+                (@as(usize, bytes[index + 1]) << 16) |
+                (@as(usize, bytes[index + 2]) << 8) |
+                bytes[index + 3];
+            index += 4;
+        },
+        else => return null,
+    }
+    if (index + len > bytes.len) return null;
+    return bytes[index .. index + len];
+}
+
+fn collectHeaderCandidates(alloc: std.mem.Allocator, block: cbor.Term) ![]HeaderCandidate {
+    var list = std.ArrayList(HeaderCandidate).init(alloc);
+    errdefer {
+        for (list.items) |candidate| {
+            alloc.free(candidate.bytes);
+        }
+        list.deinit();
+    }
+
+    if (block != .array) return list.toOwnedSlice();
+    const items = block.array;
+    if (items.len < 2) return list.toOwnedSlice();
+
+    const block_bytes = blk: {
+        if (items[1] == .bytes) break :blk items[1].bytes;
+        if (items[1] == .tag and items[1].tag.tag == 24 and items[1].tag.value.* == .bytes) {
+            break :blk items[1].tag.value.*.bytes;
+        }
+        return list.toOwnedSlice();
+    };
+
+    const inner_bytes = getTag24InnerBytes(block_bytes) orelse block_bytes;
+    var fbs = std.io.fixedBufferStream(inner_bytes);
+    const top = cbor.decode(alloc, fbs.reader()) catch return list.toOwnedSlice();
+    defer cbor.free(top, alloc);
+
+    if (top != .array) return list.toOwnedSlice();
+    const top_items = top.array;
+    if (top_items.len == 0 or top_items[0] != .array) return list.toOwnedSlice();
+
+    for (top_items[0].array, 0..) |item, i| {
+        if (item == .bytes and item.bytes.len == 32) {
+            const copy = try alloc.dupe(u8, item.bytes);
+            try list.append(.{ .index = i, .bytes = copy });
+        }
+    }
+
+    return list.toOwnedSlice();
+}
+
 fn printPoint(term: cbor.Term) void {
     if (term == .array) {
         const items = term.array;
@@ -665,6 +781,10 @@ fn printHeaderItem(index: usize, term: cbor.Term) void {
         .null => std.debug.print("header[{d}]: null\n", .{index}),
         .text => |v| std.debug.print("header[{d}]: text len={d}\n", .{ index, v.len }),
         .bytes => |b| {
+            if (index == 8 and b.len == 32) {
+                std.debug.print("prev_hash: {s}\n", .{std.fmt.fmtSliceHexLower(b)});
+                return;
+            }
             const end = if (b.len < 8) b.len else 8;
             std.debug.print(
                 "header[{d}]: bytes len={d} prefix={s}\n",
@@ -919,6 +1039,8 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
     defer if (last_tip) |tip| {
         cbor.free(tip, alloc);
     };
+    var prev_candidates: ?[]HeaderCandidate = null;
+    defer if (prev_candidates) |candidates| freeHeaderCandidates(alloc, candidates);
 
     const timeout_ms: u32 = 10_000;
     tcp_bt.setReadTimeout(&bt, timeout_ms) catch {};
@@ -1035,6 +1157,28 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
                                         const tip_hash = getTipHash(next_msg.roll_forward.tip);
                                         printBlockShallow(next_msg.roll_forward.block);
                                         printBlockHash(alloc, next_msg.roll_forward.block, tip_hash);
+                                        const curr_candidates = try collectHeaderCandidates(
+                                            alloc,
+                                            next_msg.roll_forward.block,
+                                        );
+                                        if (prev_candidates) |prev| {
+                                            for (prev) |prev_item| {
+                                                for (curr_candidates) |curr_item| {
+                                                    if (std.mem.eql(u8, prev_item.bytes, curr_item.bytes)) {
+                                                        std.debug.print(
+                                                            "prev.header[{d}] == curr.header[{d}] (possible prev-hash link)\n",
+                                                            .{ prev_item.index, curr_item.index },
+                                                        );
+                                                        std.debug.print(
+                                                            "matching indices: prev={d} curr={d}\n",
+                                                            .{ prev_item.index, curr_item.index },
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                            freeHeaderCandidates(alloc, prev);
+                                        }
+                                        prev_candidates = curr_candidates;
                                         printTip(next_msg.roll_forward.tip);
                                         try storeTip(alloc, &last_tip, next_msg.roll_forward.tip);
                                         awaiting_reply = false;
