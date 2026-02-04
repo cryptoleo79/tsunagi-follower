@@ -1204,6 +1204,8 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
     var printed_continuity_verdict = false;
     var cursor_state = try cursor_store.loadOrInit(alloc, cursor_path);
     try ensureCursorDir();
+    var last_dup_tip_hex: ?[8]u8 = null;
+    var last_saved_tip_hex: ?[8]u8 = null;
 
     vprint(
         "cursor loaded: slot={d} block_no={d} fwd={d} back={d}\n",
@@ -1348,19 +1350,38 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
                                                 has_tip_hash = true;
                                             }
                                         }
+                                        var tip_prefix8: ?[8]u8 = null;
+                                        if (has_tip_hash) {
+                                            var prefix: [8]u8 = [_]u8{'?'} ** 8;
+                                            if (tip_hash) |hash| {
+                                                if (hash.len >= 4) {
+                                                    _ = try std.fmt.bufPrint(
+                                                        &prefix,
+                                                        "{s}",
+                                                        .{std.fmt.fmtSliceHexLower(hash[0..4])},
+                                                    );
+                                                }
+                                            }
+                                            tip_prefix8 = prefix;
+                                        }
                                         if (new_slot != null and new_block_no != null and has_tip_hash) {
                                             if (new_slot.? == cursor_state.slot and
                                                 new_block_no.? == cursor_state.block_no and
                                                 std.mem.eql(u8, new_tip_hash_hex[0..], cursor_state.tip_hash_hex[0..]))
                                             {
-                                                std.debug.print(
-                                                    "ROLL FWD (duplicate) slot={d} block={d} tip={s} (no save)\n",
-                                                    .{
-                                                        new_slot.?,
-                                                        new_block_no.?,
-                                                        new_tip_hash_hex[0..8],
-                                                    },
-                                                );
+                                                if (tip_prefix8) |prefix| {
+                                                    const should_log = if (last_dup_tip_hex) |last_dup|
+                                                        !std.mem.eql(u8, last_dup[0..], prefix[0..])
+                                                    else
+                                                        true;
+                                                    if (should_log) {
+                                                        std.debug.print(
+                                                            "ROLL FWD (duplicate) slot={d} block={d} tip={s} (no save)\n",
+                                                            .{ new_slot.?, new_block_no.?, prefix[0..] },
+                                                        );
+                                                        last_dup_tip_hex = prefix;
+                                                    }
+                                                }
                                                 awaiting_reply = false;
                                                 continue;
                                             }
@@ -1601,15 +1622,11 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
                                             if (roll_event_count >= max_events) return;
                                         }
                                         var tip_prefix: [8]u8 = [_]u8{'?'} ** 8;
-                                        if (tip_hash) |hash| {
-                                            if (hash.len >= 4) {
-                                                _ = try std.fmt.bufPrint(
-                                                    &tip_prefix,
-                                                    "{s}",
-                                                    .{std.fmt.fmtSliceHexLower(hash[0..4])},
-                                                );
-                                            }
+                                        if (tip_prefix8) |prefix| {
+                                            tip_prefix = prefix;
                                         }
+                                        last_saved_tip_hex = tip_prefix;
+                                        last_dup_tip_hex = null;
                                         std.debug.print(
                                             "ROLL FWD slot={d} block={d} tip={s} fwd={d} back={d}\n",
                                             .{
