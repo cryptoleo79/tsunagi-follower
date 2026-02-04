@@ -11,6 +11,11 @@ pub const TxOut = struct {
     lovelace: u64,
 };
 
+pub const Produced = struct {
+    input: TxIn,
+    output: TxOut,
+};
+
 pub const UndoEntry = union(enum) {
     // We inserted a new UTxO in this block; rollback should remove it.
     inserted: TxIn,
@@ -59,7 +64,7 @@ pub const UTxO = struct {
     pub fn applyDelta(
         self: *UTxO,
         consumed: []const TxIn,
-        produced: []const struct { input: TxIn, output: TxOut },
+        produced: []const Produced,
     ) !Undo {
         var undo = Undo.init(self.alloc);
         errdefer undo.deinit();

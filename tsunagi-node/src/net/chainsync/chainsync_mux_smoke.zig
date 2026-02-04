@@ -4,6 +4,7 @@ const cbor = @import("../cbor/term.zig");
 const follower = @import("follower.zig");
 const journal = @import("../ledger/journal.zig");
 const tps = @import("../ledger/tps.zig");
+const utxo_mod = @import("../ledger/utxo.zig");
 const header_raw = @import("../ledger/header_raw.zig");
 const cursor_store = @import("../ledger/cursor.zig");
 
@@ -1047,6 +1048,8 @@ const FollowerCtx = struct {
     base: follower.Context,
     alloc: std.mem.Allocator,
     tps_meter: ?tps.TpsMeter = null,
+    utxo: utxo_mod.UTxO,
+    undo_stack: std.ArrayList(utxo_mod.Undo),
     prev_candidates: ?[]HeaderCandidate = null,
     prev_header_values: [15]?[]u8 = [_]?[]u8{null} ** 15,
     prev_changed: [15]bool = [_]bool{false} ** 15,
@@ -1386,6 +1389,12 @@ fn onRollForward(
     }
     ctx.tps_meter.?.addBlock(tx_count, now);
     std.debug.print("TX_COUNT={d}\n", .{tx_count});
+    const undo = try ctx.utxo.applyDelta(&[_]utxo_mod.TxIn{}, &[_]utxo_mod.Produced{});
+    try ctx.undo_stack.append(undo);
+    std.debug.print(
+        "UTXO count={d} undo_depth={d}\n",
+        .{ ctx.utxo.count(), ctx.undo_stack.items.len },
+    );
     var tip_prefix: [8]u8 = [_]u8{'?'} ** 8;
     if (tip_prefix8) |prefix| {
         tip_prefix = prefix;
@@ -1435,6 +1444,15 @@ fn onRollBackward(
         ctx.base.cursor.tip_hash_hex[0..],
     );
     std.debug.print("JOURNAL append back\n", .{});
+    if (ctx.undo_stack.items.len > 0) {
+        var undo = ctx.undo_stack.pop();
+        ctx.utxo.rollbackDelta(&undo);
+        undo.deinit();
+    }
+    std.debug.print(
+        "UTXO rollback count={d} undo_depth={d}\n",
+        .{ ctx.utxo.count(), ctx.undo_stack.items.len },
+    );
     const tip_hash = getTipHash(tip);
     if (getTipSlotBlock(tip)) |tip_info| {
         ctx.base.cursor.slot = tip_info.slot;
@@ -1503,6 +1521,8 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
         },
         .alloc = alloc,
         .tps_meter = null,
+        .utxo = utxo_mod.UTxO.init(alloc),
+        .undo_stack = std.ArrayList(utxo_mod.Undo).init(alloc),
         .prev_candidates = null,
         .prev_header_values = [_]?[]u8{null} ** 15,
         .prev_changed = [_]bool{false} ** 15,
@@ -1517,6 +1537,11 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
     defer {
         if (ctx.prev_candidates) |candidates| freeHeaderCandidates(alloc, candidates);
         freeHeaderValues(alloc, &ctx.prev_header_values);
+        for (ctx.undo_stack.items) |*undo| {
+            undo.deinit();
+        }
+        ctx.undo_stack.deinit();
+        ctx.utxo.deinit();
     }
 
     try ensureCursorDir();
