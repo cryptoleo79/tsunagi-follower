@@ -2,11 +2,13 @@ const std = @import("std");
 
 const cbor = @import("../cbor/term.zig");
 const follower = @import("follower.zig");
+const journal = @import("../ledger/journal.zig");
 const header_raw = @import("../ledger/header_raw.zig");
 const cursor_store = @import("../ledger/cursor.zig");
 
 const cursor_dir = "/home/midnight/.tsunagi";
 const cursor_path = "/home/midnight/.tsunagi/cursor.json";
+const journal_path = "/home/midnight/.tsunagi/journal.ndjson";
 const DEBUG_VERBOSE = false;
 
 fn vprint(comptime fmt: []const u8, args: anytype) void {
@@ -1359,6 +1361,15 @@ fn onRollForward(
     ctx.base.cursor.updated_unix = std.time.timestamp();
     try cursor_store.save(ctx.base.cursor, cursor_path);
     std.debug.print("CURSOR saved {s}\n", .{cursor_path});
+    try journal.appendRollForward(
+        journal_path,
+        std.time.timestamp(),
+        ctx.base.cursor.slot,
+        ctx.base.cursor.block_no,
+        ctx.base.cursor.tip_hash_hex[0..],
+        ctx.base.cursor.header_hash_hex[0..],
+    );
+    std.debug.print("JOURNAL append fwd\n", .{});
     var tip_prefix: [8]u8 = [_]u8{'?'} ** 8;
     if (tip_prefix8) |prefix| {
         tip_prefix = prefix;
@@ -1400,6 +1411,14 @@ fn onRollBackward(
     ctx.base.cursor.updated_unix = std.time.timestamp();
     try cursor_store.save(ctx.base.cursor, cursor_path);
     std.debug.print("CURSOR saved {s}\n", .{cursor_path});
+    try journal.appendRollBackward(
+        journal_path,
+        std.time.timestamp(),
+        ctx.base.cursor.slot,
+        ctx.base.cursor.block_no,
+        ctx.base.cursor.tip_hash_hex[0..],
+    );
+    std.debug.print("JOURNAL append back\n", .{});
     const tip_hash = getTipHash(tip);
     if (getTipSlotBlock(tip)) |tip_info| {
         ctx.base.cursor.slot = tip_info.slot;
