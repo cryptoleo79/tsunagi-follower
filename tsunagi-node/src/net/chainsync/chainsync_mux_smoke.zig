@@ -10,12 +10,20 @@ const header_raw = @import("../ledger/header_raw.zig");
 const cursor_store = @import("../ledger/cursor.zig");
 
 const chainsync_proto: u16 = 2;
-const cursor_path = "/tmp/tsunagi_cursor.json";
+const cursor_dir = "/home/midnight/.tsunagi";
+const cursor_path = "/home/midnight/.tsunagi/cursor.json";
 const MAX_EVENTS: ?u64 = null;
 const DEBUG_VERBOSE = false;
 
 fn vprint(comptime fmt: []const u8, args: anytype) void {
     if (DEBUG_VERBOSE) std.debug.print(fmt, args);
+}
+
+fn ensureCursorDir() !void {
+    std.fs.makeDirAbsolute(cursor_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
 }
 
 const HeaderCandidate = struct {
@@ -1195,6 +1203,7 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
     var prev_header_body_raw: ?header_raw.HeaderBodyRawSnapshot = null;
     var printed_continuity_verdict = false;
     var cursor_state = try cursor_store.loadOrInit(alloc, cursor_path);
+    try ensureCursorDir();
 
     vprint(
         "cursor loaded: slot={d} block_no={d} fwd={d} back={d}\n",
