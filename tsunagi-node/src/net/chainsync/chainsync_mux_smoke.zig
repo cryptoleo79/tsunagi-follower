@@ -49,6 +49,32 @@ fn printHeader32List(label: []const u8, candidates: []HeaderCandidate) void {
     std.debug.print("]\n", .{});
 }
 
+fn printContinuityVerdict(
+    prev: header_raw.HeaderBodyRawSnapshot,
+    curr: header_raw.HeaderBodyRawSnapshot,
+    structure_ok: bool,
+) void {
+    const slot_delta: i64 = @as(i64, @intCast(curr.f0_u64)) - @as(i64, @intCast(prev.f0_u64));
+    const block_delta: i64 = @as(i64, @intCast(curr.f1_u64)) - @as(i64, @intCast(prev.f1_u64));
+    const protocol_stable = prev.f7_u64 == curr.f7_u64 and
+        prev.f13_u64 == curr.f13_u64 and
+        prev.f14_u64 == curr.f14_u64;
+    const leader_changed = !std.mem.eql(u8, prev.f3_bytes32[0..], curr.f3_bytes32[0..]) or
+        !std.mem.eql(u8, prev.f4_bytes32[0..], curr.f4_bytes32[0..]);
+
+    std.debug.print("continuity slot delta={d}\n", .{slot_delta});
+    std.debug.print("continuity block number delta={d}\n", .{block_delta});
+    std.debug.print("continuity protocol stable={s}\n", .{if (protocol_stable) "true" else "false"});
+    std.debug.print("continuity leader changed={s}\n", .{if (leader_changed) "true" else "false"});
+
+    const ok = structure_ok and slot_delta >= 0 and block_delta >= 0 and protocol_stable;
+    if (ok) {
+        std.debug.print("continuity verdict: OK (light follower)\n", .{});
+    } else {
+        std.debug.print("continuity verdict: WARN (rollback or protocol change)\n", .{});
+    }
+}
+
 fn captureFirstRollForward(
     alloc: std.mem.Allocator,
     tip: cbor.Term,
@@ -1135,6 +1161,7 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
     var prev_header_hash_opt: ?[32]u8 = null;
     var prev_header_cbor_len: ?usize = null;
     var prev_header_body_raw: ?header_raw.HeaderBodyRawSnapshot = null;
+    var printed_continuity_verdict = false;
 
     const timeout_ms: u32 = 10_000;
     tcp_bt.setReadTimeout(&bt, timeout_ms) catch {};
@@ -1204,8 +1231,10 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
                     const req_bytes = try req_list.toOwnedSlice();
                     defer alloc.free(req_bytes);
 
-                    var i: u8 = 0;
-                    while (i < 3) : (i += 1) {
+                    const max_steps: u8 = 10;
+                    var steps: u8 = 0;
+                    var roll_forward_count: u8 = 0;
+                    while (steps < max_steps and roll_forward_count < 2) : (steps += 1) {
                         try mux_bearer.sendSegment(&bt, .responder, chainsync_proto, req_bytes);
 
                         const req_deadline_ms: i64 = std.time.milliTimestamp() + timeout_ms;
@@ -1243,11 +1272,12 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
 
                                 switch (next_msg) {
                                     .await_reply => {
-                                        std.debug.print("chainsync[{d}]: await reply\n", .{i});
+                                        std.debug.print("chainsync[{d}]: await reply\n", .{steps});
                                         awaiting_reply = true;
                                     },
                                     .roll_forward => {
-                                        std.debug.print("chainsync[{d}]: roll forward\n", .{i});
+                                        std.debug.print("chainsync[{d}]: roll forward\n", .{steps});
+                                        roll_forward_count += 1;
                                         const tip_hash = getTipHash(next_msg.roll_forward.tip);
                                         printBlockShallow(next_msg.roll_forward.block);
                                         printBlockHash(alloc, next_msg.roll_forward.block, tip_hash);
@@ -1266,7 +1296,6 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
                                                     next_msg.roll_forward.tip,
                                                     header_info.cbor_bytes,
                                                 );
-                                                return;
                                             }
                                             if (prev_header_hash_opt) |prev_hash| {
                                                 if (header_info.prev_hash) |next_prev_hash| {
@@ -1283,7 +1312,11 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
                                             );
                                             if (curr_body_opt) |curr_body| {
                                                 if (prev_header_body_raw) |prev_body| {
-                                                    header_raw.printHeaderBodyRawStability(prev_body, curr_body, true);
+                                                    if (roll_forward_count == 2 and !printed_continuity_verdict) {
+                                                        header_raw.printHeaderBodyRawStability(prev_body, curr_body, true);
+                                                        printContinuityVerdict(prev_body, curr_body, true);
+                                                        printed_continuity_verdict = true;
+                                                    }
                                                 }
                                                 prev_header_body_raw = curr_body;
                                                 if (prev_header_hash_opt) |prev_hash| {
@@ -1360,17 +1393,10 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
                                                         }
                                                     }
 
-                                                    if (match_any) {
-                                                        std.debug.print(
-                                                            "CHAIN OK: curr_prev_hash matches prev_header_hash\n",
-                                                            .{},
-                                                        );
-                                                    } else {
-                                                        std.debug.print(
-                                                            "CHAIN FAIL: curr_prev_hash != prev_header_hash\n",
-                                                            .{},
-                                                        );
-                                                    }
+                                                    std.debug.print(
+                                                        "curr_prev_hash matches prev_header_hash={s}\n",
+                                                        .{if (match_any) "true" else "false"},
+                                                    );
                                                 }
                                             } else if (prev_header_body_raw != null) {
                                                 std.debug.print("consensus continuity: BROKEN\n", .{});
@@ -1464,16 +1490,19 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
                                         printTip(next_msg.roll_forward.tip);
                                         try storeTip(alloc, &last_tip, next_msg.roll_forward.tip);
                                         awaiting_reply = false;
+                                        if (roll_forward_count == 2 and printed_continuity_verdict) {
+                                            return;
+                                        }
                                     },
                                     .roll_backward => {
-                                        std.debug.print("chainsync[{d}]: roll backward\n", .{i});
+                                        std.debug.print("chainsync[{d}]: roll backward\n", .{steps});
                                         printPoint(next_msg.roll_backward.point);
                                         printTip(next_msg.roll_backward.tip);
                                         try storeTip(alloc, &last_tip, next_msg.roll_backward.tip);
                                         awaiting_reply = false;
                                     },
                                     else => {
-                                        std.debug.print("chainsync[{d}]: no response\n", .{i});
+                                        std.debug.print("chainsync[{d}]: no response\n", .{steps});
                                         awaiting_reply = false;
                                     },
                                 }
