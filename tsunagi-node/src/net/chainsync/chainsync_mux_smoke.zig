@@ -7,8 +7,10 @@ const mux_bearer = @import("../muxwire/mux_bearer.zig");
 const bt_boundary = @import("../transport/byte_transport.zig");
 const tcp_bt = @import("../transport/tcp_byte_transport.zig");
 const header_raw = @import("../ledger/header_raw.zig");
+const cursor_store = @import("../ledger/cursor.zig");
 
 const chainsync_proto: u16 = 2;
+const cursor_path = "/tmp/tsunagi_cursor.json";
 
 const HeaderCandidate = struct {
     index: usize,
@@ -1065,6 +1067,30 @@ fn getTipHash(term: cbor.Term) ?[]const u8 {
     return point[1].bytes;
 }
 
+const TipSlotBlock = struct {
+    slot: u64,
+    block_no: u64,
+};
+
+fn getTipSlotBlock(term: cbor.Term) ?TipSlotBlock {
+    if (term != .array) return null;
+    const items = term.array;
+    const inner = blk: {
+        if (items.len == 1 and items[0] == .array) break :blk items[0].array;
+        break :blk items;
+    };
+    if (inner.len == 2 and inner[0] == .array and inner[1] == .u64) {
+        const point = inner[0].array;
+        if (point.len == 2 and point[0] == .u64 and point[1] == .bytes) {
+            return .{ .slot = point[0].u64, .block_no = inner[1].u64 };
+        }
+    }
+    if (inner.len >= 3 and inner[0] == .u64 and inner[2] == .u64) {
+        return .{ .slot = inner[0].u64, .block_no = inner[2].u64 };
+    }
+    return null;
+}
+
 fn printTipArray(items: []const cbor.Term) void {
     if (items.len == 2 and items[0] == .array and items[1] == .u64) {
         const inner = items[0].array;
@@ -1162,6 +1188,17 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
     var prev_header_cbor_len: ?usize = null;
     var prev_header_body_raw: ?header_raw.HeaderBodyRawSnapshot = null;
     var printed_continuity_verdict = false;
+    var cursor_state = try cursor_store.loadOrInit(alloc, cursor_path);
+
+    std.debug.print(
+        "cursor loaded: slot={d} block_no={d} fwd={d} back={d}\n",
+        .{
+            cursor_state.slot,
+            cursor_state.block_no,
+            cursor_state.roll_forward_count,
+            cursor_state.roll_backward_count,
+        },
+    );
 
     const timeout_ms: u32 = 10_000;
     tcp_bt.setReadTimeout(&bt, timeout_ms) catch {};
@@ -1279,11 +1316,29 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
                                         std.debug.print("chainsync[{d}]: roll forward\n", .{steps});
                                         roll_forward_count += 1;
                                         const tip_hash = getTipHash(next_msg.roll_forward.tip);
+                                        if (getTipSlotBlock(next_msg.roll_forward.tip)) |tip_info| {
+                                            cursor_state.slot = tip_info.slot;
+                                            cursor_state.block_no = tip_info.block_no;
+                                        }
+                                        if (tip_hash) |hash| {
+                                            if (hash.len == 32) {
+                                                _ = try std.fmt.bufPrint(
+                                                    &cursor_state.tip_hash_hex,
+                                                    "{s}",
+                                                    .{std.fmt.fmtSliceHexLower(hash)},
+                                                );
+                                            }
+                                        }
                                         printBlockShallow(next_msg.roll_forward.block);
                                         printBlockHash(alloc, next_msg.roll_forward.block, tip_hash);
                                         if (extractHeaderCborInfo(alloc, next_msg.roll_forward.block)) |header_info| {
                                             defer alloc.free(header_info.cbor_bytes);
                                             const header_hash = headerHashBlake2b256(header_info.cbor_bytes);
+                                            _ = try std.fmt.bufPrint(
+                                                &cursor_state.header_hash_hex,
+                                                "{s}",
+                                                .{std.fmt.fmtSliceHexLower(&header_hash)},
+                                            );
                                             if (!captured_first_rollforward) {
                                                 captured_first_rollforward = true;
                                                 captureFirstRollForward(
@@ -1489,6 +1544,10 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
                                         prev_changed = curr_changed;
                                         printTip(next_msg.roll_forward.tip);
                                         try storeTip(alloc, &last_tip, next_msg.roll_forward.tip);
+                                        cursor_state.roll_forward_count += 1;
+                                        cursor_state.updated_unix = std.time.timestamp();
+                                        try cursor_store.save(cursor_state, cursor_path);
+                                        std.debug.print("cursor saved (roll forward)\n", .{});
                                         awaiting_reply = false;
                                         if (roll_forward_count == 2 and printed_continuity_verdict) {
                                             return;
@@ -1499,6 +1558,10 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
                                         printPoint(next_msg.roll_backward.point);
                                         printTip(next_msg.roll_backward.tip);
                                         try storeTip(alloc, &last_tip, next_msg.roll_backward.tip);
+                                        cursor_state.roll_backward_count += 1;
+                                        cursor_state.updated_unix = std.time.timestamp();
+                                        try cursor_store.save(cursor_state, cursor_path);
+                                        std.debug.print("cursor saved (roll backward)\n", .{});
                                         awaiting_reply = false;
                                     },
                                     else => {
