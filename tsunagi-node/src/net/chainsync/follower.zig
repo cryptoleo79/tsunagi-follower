@@ -8,7 +8,7 @@ const bt_boundary = @import("../transport/byte_transport.zig");
 const tcp_bt = @import("../transport/tcp_byte_transport.zig");
 const header_raw = @import("../ledger/header_raw.zig");
 const cursor_store = @import("../ledger/cursor.zig");
-const tps = @import("../metrics/tps.zig");
+const tps = @import("../ledger/tps.zig");
 
 const chainsync_proto: u16 = 2;
 const keepalive_proto: u16 = 8;
@@ -271,21 +271,187 @@ fn computeHeaderHash32(alloc: std.mem.Allocator, header_cbor_bytes: []const u8) 
     return digest;
 }
 
-fn computeTxCount(alloc: std.mem.Allocator, inner_bytes: []const u8) u64 {
-    var fbs = std.io.fixedBufferStream(inner_bytes);
-    const top = cbor.decode(alloc, fbs.reader()) catch return 0;
-    defer cbor.free(top, alloc);
+fn readHead(bytes: []const u8, idx: *usize) ?struct { major: u8, ai: u8 } {
+    if (idx.* >= bytes.len) return null;
+    const b = bytes[idx.*];
+    idx.* += 1;
+    return .{ .major = b >> 5, .ai = b & 0x1f };
+}
 
-    if (top != .array) return 0;
-    const items = top.array;
-    if (items.len < 2 or items[1] != .bytes) return 0;
+fn readLen(bytes: []const u8, idx: *usize, ai: u8) ?usize {
+    switch (ai) {
+        0...23 => return ai,
+        24 => {
+            if (idx.* + 1 > bytes.len) return null;
+            const v = bytes[idx.*];
+            idx.* += 1;
+            return v;
+        },
+        25 => {
+            if (idx.* + 2 > bytes.len) return null;
+            const v = (@as(usize, bytes[idx.*]) << 8) | bytes[idx.* + 1];
+            idx.* += 2;
+            return v;
+        },
+        26 => {
+            if (idx.* + 4 > bytes.len) return null;
+            const v = (@as(usize, bytes[idx.*]) << 24) |
+                (@as(usize, bytes[idx.* + 1]) << 16) |
+                (@as(usize, bytes[idx.* + 2]) << 8) |
+                bytes[idx.* + 3];
+            idx.* += 4;
+            return v;
+        },
+        27 => {
+            if (idx.* + 8 > bytes.len) return null;
+            var v: usize = 0;
+            var i: usize = 0;
+            while (i < 8) : (i += 1) {
+                v = (v << 8) | bytes[idx.* + i];
+            }
+            idx.* += 8;
+            return v;
+        },
+        31 => return null,
+        else => return null,
+    }
+}
 
-    var body_fbs = std.io.fixedBufferStream(items[1].bytes);
-    const body = cbor.decode(alloc, body_fbs.reader()) catch return 0;
-    defer cbor.free(body, alloc);
+fn peekMajor(bytes: []const u8, idx: usize) ?u8 {
+    if (idx >= bytes.len) return null;
+    return bytes[idx] >> 5;
+}
 
-    if (body != .array) return 0;
-    return @as(u64, @intCast(body.array.len));
+fn skipItem(bytes: []const u8, idx: *usize) bool {
+    const head = readHead(bytes, idx) orelse return false;
+    const major = head.major;
+    const ai = head.ai;
+
+    switch (major) {
+        0, 1 => {
+            _ = readLen(bytes, idx, ai) orelse return false;
+            return true;
+        },
+        2, 3 => {
+            const len = readLen(bytes, idx, ai) orelse return false;
+            if (idx.* + len > bytes.len) return false;
+            idx.* += len;
+            return true;
+        },
+        4 => {
+            const len = readLen(bytes, idx, ai) orelse return false;
+            var i: usize = 0;
+            while (i < len) : (i += 1) {
+                if (!skipItem(bytes, idx)) return false;
+            }
+            return true;
+        },
+        5 => {
+            const len = readLen(bytes, idx, ai) orelse return false;
+            var i: usize = 0;
+            while (i < len) : (i += 1) {
+                if (!skipItem(bytes, idx)) return false;
+                if (!skipItem(bytes, idx)) return false;
+            }
+            return true;
+        },
+        6 => {
+            _ = readLen(bytes, idx, ai) orelse return false;
+            return skipItem(bytes, idx);
+        },
+        7 => return true,
+        else => return false,
+    }
+}
+
+fn scanTxBodiesCount(body_bytes: []const u8) u64 {
+    var idx: usize = 0;
+    while (idx < body_bytes.len) {
+        const start = idx;
+        const head = readHead(body_bytes, &idx) orelse return 0;
+        if (head.major == 4) {
+            const len = readLen(body_bytes, &idx, head.ai) orelse return 0;
+            if (idx >= body_bytes.len) return 0;
+            const first_major = peekMajor(body_bytes, idx) orelse return 0;
+            if (first_major == 5) {
+                return @as(u64, @intCast(len));
+            }
+            if (first_major == 6) {
+                var tag_idx = idx;
+                const tag_head = readHead(body_bytes, &tag_idx) orelse return 0;
+                if (tag_head.major == 6) {
+                    _ = readLen(body_bytes, &tag_idx, tag_head.ai) orelse return 0;
+                    const next_major = peekMajor(body_bytes, tag_idx) orelse return 0;
+                    if (next_major == 5) {
+                        return @as(u64, @intCast(len));
+                    }
+                }
+            }
+        }
+        idx = start;
+        if (!skipItem(body_bytes, &idx)) return 0;
+    }
+    return 0;
+}
+
+fn extractTxCount(block_body_bytes: []const u8, alloc: std.mem.Allocator, debug: bool) u64 {
+    const DEBUG_TX_DISCOVERY = true;
+
+    var outer_fbs = std.io.fixedBufferStream(block_body_bytes);
+    const outer = cbor.decode(alloc, outer_fbs.reader()) catch {
+        if (debug and DEBUG_TX_DISCOVERY) {
+            std.debug.print("TX_DISCOVERY: outer_decode=fail\n", .{});
+        }
+        return 0;
+    };
+    defer cbor.free(outer, alloc);
+
+    if (outer != .array) {
+        if (debug and DEBUG_TX_DISCOVERY) {
+            std.debug.print("TX_DISCOVERY: outer_not_array\n", .{});
+        }
+        return 0;
+    }
+    const outer_items = outer.array;
+    if (outer_items.len < 2) {
+        if (debug and DEBUG_TX_DISCOVERY) {
+            std.debug.print("TX_DISCOVERY: outer_len_lt_2\n", .{});
+        }
+        return 0;
+    }
+    if (outer_items[1] != .bytes) {
+        if (debug and DEBUG_TX_DISCOVERY) {
+            std.debug.print("TX_DISCOVERY: outer_body_not_bytes kind=", .{});
+            switch (outer_items[1]) {
+                .u64 => std.debug.print("u64\n", .{}),
+                .i64 => std.debug.print("i64\n", .{}),
+                .bool => std.debug.print("bool\n", .{}),
+                .null => std.debug.print("null\n", .{}),
+                .bytes => std.debug.print("bytes\n", .{}),
+                .text => std.debug.print("text\n", .{}),
+                .array => |arr| std.debug.print("array({d})\n", .{arr.len}),
+                .map_u64 => |m| std.debug.print("map({d})\n", .{m.len}),
+                .tag => |t| std.debug.print("tag({d})\n", .{t.tag}),
+            }
+        }
+        if (debug) {
+            std.debug.print("BODY_BYTES missing\n", .{});
+        }
+        return 0;
+    }
+
+    const body_bytes = outer_items[1].bytes;
+    if (debug) {
+        std.debug.print("BODY_BYTES len={d}\n", .{body_bytes.len});
+    }
+    const count = scanTxBodiesCount(body_bytes);
+    if (debug and DEBUG_TX_DISCOVERY) {
+        std.debug.print(
+            "TX_DISCOVERY: scan body_bytes=len{d} found={s} count={d}\n",
+            .{ body_bytes.len, if (count > 0) "yes" else "no", count },
+        );
+    }
+    return count;
 }
 
 fn cloneTerm(alloc: std.mem.Allocator, term: cbor.Term) !cbor.Term {
@@ -361,6 +527,7 @@ pub fn run(
     try installSignalHandlers(&should_stop);
 
     var tps_meter = tps.TpsMeter.init(std.time.timestamp());
+    var last_body_debug_prefix: ?[8]u8 = null;
 
     var last_tip: ?cbor.Term = null;
     defer if (last_tip) |tip| {
@@ -443,7 +610,7 @@ pub fn run(
         };
         if (seg == null) {
             vprint(ctx.debug_verbose, "peer closed\n", .{});
-            return;
+            continue :outer;
         }
         defer alloc.free(seg.?.payload);
 
@@ -495,7 +662,7 @@ pub fn run(
                             };
                             if (next_seg == null) {
                                 vprint(ctx.debug_verbose, "peer closed\n", .{});
-                                return;
+                                continue :outer;
                             }
                             defer alloc.free(next_seg.?.payload);
 
@@ -550,7 +717,24 @@ pub fn run(
                                         };
                                         const header_hash32_value = computeHeaderHash32(alloc, inner_bytes) orelse
                                             return HeaderHashError.InvalidHeader;
-                                        const tx_count = computeTxCount(alloc, inner_bytes);
+                                        var debug_body = false;
+                                        var tip_prefix: [8]u8 = [_]u8{'?'} ** 8;
+                                        _ = try std.fmt.bufPrint(
+                                            &tip_prefix,
+                                            "{s}",
+                                            .{std.fmt.fmtSliceHexLower(tip_hash32_value[0..4])},
+                                        );
+                                        if (last_body_debug_prefix) |last| {
+                                            if (!std.mem.eql(u8, last[0..], tip_prefix[0..])) {
+                                                debug_body = true;
+                                            }
+                                        } else {
+                                            debug_body = true;
+                                        }
+                                        if (debug_body) {
+                                            last_body_debug_prefix = tip_prefix;
+                                        }
+                                        const tx_count = extractTxCount(inner_bytes, alloc, debug_body);
 
                                         if (DEBUG_VERBOSE) {
                                             var header_prefix: [8]u8 = [_]u8{'?'} ** 8;
@@ -622,7 +806,6 @@ pub fn run(
                             }
                         }
                     }
-                    return;
                 },
                 .intersect_not_found => {
                     vprint(ctx.debug_verbose, "chainsync: intersect not found\n", .{});
