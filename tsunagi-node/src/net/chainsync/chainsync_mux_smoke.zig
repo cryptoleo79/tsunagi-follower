@@ -11,6 +11,12 @@ const cursor_store = @import("../ledger/cursor.zig");
 
 const chainsync_proto: u16 = 2;
 const cursor_path = "/tmp/tsunagi_cursor.json";
+const MAX_EVENTS: ?u64 = null;
+const DEBUG_VERBOSE = false;
+
+fn vprint(comptime fmt: []const u8, args: anytype) void {
+    if (DEBUG_VERBOSE) std.debug.print(fmt, args);
+}
 
 const HeaderCandidate = struct {
     index: usize,
@@ -1190,7 +1196,7 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
     var printed_continuity_verdict = false;
     var cursor_state = try cursor_store.loadOrInit(alloc, cursor_path);
 
-    std.debug.print(
+    vprint(
         "cursor loaded: slot={d} block_no={d} fwd={d} back={d}\n",
         .{
             cursor_state.slot,
@@ -1205,7 +1211,7 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
 
     const accepted = try doHandshake(alloc, &bt);
     if (!accepted) {
-        std.debug.print("chainsync: no response\n", .{});
+        vprint("chainsync: no response\n", .{});
         return;
     }
 
@@ -1221,14 +1227,14 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
     defer alloc.free(msg_bytes);
 
     try mux_bearer.sendSegment(&bt, .responder, chainsync_proto, msg_bytes);
-    std.debug.print("chainsync: sent FindIntersect ({d} bytes)\n", .{msg_bytes.len});
+    vprint("chainsync: sent FindIntersect ({d} bytes)\n", .{msg_bytes.len});
 
     const deadline_ms: i64 = std.time.milliTimestamp() + timeout_ms;
 
     while (true) {
         const now_ms = std.time.milliTimestamp();
         if (now_ms >= deadline_ms) {
-            std.debug.print("chainsync: timed out after 10000ms\n", .{});
+            vprint("chainsync: timed out after 10000ms\n", .{});
             return;
         }
 
@@ -1240,13 +1246,13 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
             else => return err,
         };
         if (seg == null) {
-            std.debug.print("peer closed\n", .{});
+            vprint("peer closed\n", .{});
             return;
         }
         defer alloc.free(seg.?.payload);
 
         const hdr = seg.?.hdr;
-        std.debug.print(
+        vprint(
             "mux: rx hdr dir={s} proto={d} len={d}\n",
             .{ @tagName(hdr.dir), hdr.proto, hdr.len },
         );
@@ -1258,8 +1264,8 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
 
             switch (msg) {
                 .intersect_found => {
-                    std.debug.print("chainsync: intersect found\n", .{});
-                    printTip(msg.intersect_found.tip);
+                    vprint("chainsync: intersect found\n", .{});
+                    if (DEBUG_VERBOSE) printTip(msg.intersect_found.tip);
                     try storeTip(alloc, &last_tip, msg.intersect_found.tip);
 
                     var req_list = std.ArrayList(u8).init(alloc);
@@ -1268,10 +1274,10 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
                     const req_bytes = try req_list.toOwnedSlice();
                     defer alloc.free(req_bytes);
 
-                    const max_steps: u8 = 10;
-                    var steps: u8 = 0;
-                    var roll_forward_count: u8 = 0;
-                    while (steps < max_steps and roll_forward_count < 2) : (steps += 1) {
+                    var steps: u64 = 0;
+                    var roll_forward_count: u64 = 0;
+                    var roll_event_count: u64 = 0;
+                    while (true) : (steps += 1) {
                         try mux_bearer.sendSegment(&bt, .responder, chainsync_proto, req_bytes);
 
                         const req_deadline_ms: i64 = std.time.milliTimestamp() + timeout_ms;
@@ -1279,7 +1285,7 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
                         while (awaiting_reply) {
                             const req_now_ms = std.time.milliTimestamp();
                             if (req_now_ms >= req_deadline_ms) {
-                                std.debug.print("chainsync: timed out after 10000ms\n", .{});
+                                vprint("chainsync: timed out after 10000ms\n", .{});
                                 return;
                             }
 
@@ -1291,13 +1297,13 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
                                 else => return err,
                             };
                             if (next_seg == null) {
-                                std.debug.print("peer closed\n", .{});
+                                vprint("peer closed\n", .{});
                                 return;
                             }
                             defer alloc.free(next_seg.?.payload);
 
                             const next_hdr = next_seg.?.hdr;
-                            std.debug.print(
+                            vprint(
                                 "mux: rx hdr dir={s} proto={d} len={d}\n",
                                 .{ @tagName(next_hdr.dir), next_hdr.proto, next_hdr.len },
                             );
@@ -1309,28 +1315,57 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
 
                                 switch (next_msg) {
                                     .await_reply => {
-                                        std.debug.print("chainsync[{d}]: await reply\n", .{steps});
+                                        vprint("chainsync[{d}]: await reply\n", .{steps});
                                         awaiting_reply = true;
                                     },
                                     .roll_forward => {
-                                        std.debug.print("chainsync[{d}]: roll forward\n", .{steps});
-                                        roll_forward_count += 1;
+                                        vprint("chainsync[{d}]: roll forward\n", .{steps});
                                         const tip_hash = getTipHash(next_msg.roll_forward.tip);
+                                        var new_slot: ?u64 = null;
+                                        var new_block_no: ?u64 = null;
                                         if (getTipSlotBlock(next_msg.roll_forward.tip)) |tip_info| {
-                                            cursor_state.slot = tip_info.slot;
-                                            cursor_state.block_no = tip_info.block_no;
+                                            new_slot = tip_info.slot;
+                                            new_block_no = tip_info.block_no;
                                         }
+                                        var new_tip_hash_hex = cursor_state.tip_hash_hex;
+                                        var has_tip_hash = false;
                                         if (tip_hash) |hash| {
                                             if (hash.len == 32) {
                                                 _ = try std.fmt.bufPrint(
-                                                    &cursor_state.tip_hash_hex,
+                                                    &new_tip_hash_hex,
                                                     "{s}",
                                                     .{std.fmt.fmtSliceHexLower(hash)},
                                                 );
+                                                has_tip_hash = true;
                                             }
                                         }
-                                        printBlockShallow(next_msg.roll_forward.block);
-                                        printBlockHash(alloc, next_msg.roll_forward.block, tip_hash);
+                                        if (new_slot != null and new_block_no != null and has_tip_hash) {
+                                            if (new_slot.? == cursor_state.slot and
+                                                new_block_no.? == cursor_state.block_no and
+                                                std.mem.eql(u8, new_tip_hash_hex[0..], cursor_state.tip_hash_hex[0..]))
+                                            {
+                                                std.debug.print(
+                                                    "ROLL FWD (duplicate) slot={d} block={d} tip={s} (no save)\n",
+                                                    .{
+                                                        new_slot.?,
+                                                        new_block_no.?,
+                                                        new_tip_hash_hex[0..8],
+                                                    },
+                                                );
+                                                awaiting_reply = false;
+                                                continue;
+                                            }
+                                        }
+                                        if (new_slot) |slot| cursor_state.slot = slot;
+                                        if (new_block_no) |block_no| cursor_state.block_no = block_no;
+                                        if (has_tip_hash) {
+                                            cursor_state.tip_hash_hex = new_tip_hash_hex;
+                                        }
+                                        roll_forward_count += 1;
+                                        if (DEBUG_VERBOSE) {
+                                            printBlockShallow(next_msg.roll_forward.block);
+                                            printBlockHash(alloc, next_msg.roll_forward.block, tip_hash);
+                                        }
                                         if (extractHeaderCborInfo(alloc, next_msg.roll_forward.block)) |header_info| {
                                             defer alloc.free(header_info.cbor_bytes);
                                             const header_hash = headerHashBlake2b256(header_info.cbor_bytes);
@@ -1341,21 +1376,23 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
                                             );
                                             if (!captured_first_rollforward) {
                                                 captured_first_rollforward = true;
-                                                captureFirstRollForward(
-                                                    alloc,
-                                                    next_msg.roll_forward.tip,
-                                                    header_info.cbor_bytes,
-                                                    header_info.prev_hash,
-                                                );
-                                                try writeCaptureFile(
-                                                    next_msg.roll_forward.tip,
-                                                    header_info.cbor_bytes,
-                                                );
+                                                if (DEBUG_VERBOSE) {
+                                                    captureFirstRollForward(
+                                                        alloc,
+                                                        next_msg.roll_forward.tip,
+                                                        header_info.cbor_bytes,
+                                                        header_info.prev_hash,
+                                                    );
+                                                    try writeCaptureFile(
+                                                        next_msg.roll_forward.tip,
+                                                        header_info.cbor_bytes,
+                                                    );
+                                                }
                                             }
                                             if (prev_header_hash_opt) |prev_hash| {
                                                 if (header_info.prev_hash) |next_prev_hash| {
                                                     const matches = std.mem.eql(u8, prev_hash[0..], next_prev_hash[0..]);
-                                                    std.debug.print(
+                                                    vprint(
                                                         "header_hash == next.prev_hash ({s})\n",
                                                         .{if (matches) "true" else "false"},
                                                     );
@@ -1368,8 +1405,10 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
                                             if (curr_body_opt) |curr_body| {
                                                 if (prev_header_body_raw) |prev_body| {
                                                     if (roll_forward_count == 2 and !printed_continuity_verdict) {
-                                                        header_raw.printHeaderBodyRawStability(prev_body, curr_body, true);
-                                                        printContinuityVerdict(prev_body, curr_body, true);
+                                                        if (DEBUG_VERBOSE) {
+                                                            header_raw.printHeaderBodyRawStability(prev_body, curr_body, true);
+                                                            printContinuityVerdict(prev_body, curr_body, true);
+                                                        }
                                                         printed_continuity_verdict = true;
                                                     }
                                                 }
@@ -1381,12 +1420,12 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
                                                         prev_hash[0..],
                                                         curr_body.f3_bytes32[0..],
                                                     );
-                                                    std.debug.print(
+                                                    vprint(
                                                         "prev_header_hash == curr.f3_bytes32 -> {s}\n",
                                                         .{if (matches_f3) "true" else "false"},
                                                     );
                                                     if (matches_f3) {
-                                                        std.debug.print("MATCH FIELD: f3\n", .{});
+                                                        vprint("MATCH FIELD: f3\n", .{});
                                                         match_any = true;
                                                     }
 
@@ -1395,12 +1434,12 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
                                                         prev_hash[0..],
                                                         curr_body.f4_bytes32[0..],
                                                     );
-                                                    std.debug.print(
+                                                    vprint(
                                                         "prev_header_hash == curr.f4_bytes32 -> {s}\n",
                                                         .{if (matches_f4) "true" else "false"},
                                                     );
                                                     if (matches_f4) {
-                                                        std.debug.print("MATCH FIELD: f4\n", .{});
+                                                        vprint("MATCH FIELD: f4\n", .{});
                                                         match_any = true;
                                                     }
 
@@ -1409,12 +1448,12 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
                                                         prev_hash[0..],
                                                         curr_body.f8_bytes32[0..],
                                                     );
-                                                    std.debug.print(
+                                                    vprint(
                                                         "prev_header_hash == curr.f8_bytes32 -> {s}\n",
                                                         .{if (matches_f8) "true" else "false"},
                                                     );
                                                     if (matches_f8) {
-                                                        std.debug.print("MATCH FIELD: f8\n", .{});
+                                                        vprint("MATCH FIELD: f8\n", .{});
                                                         match_any = true;
                                                     }
 
@@ -1423,12 +1462,12 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
                                                         prev_hash[0..],
                                                         curr_body.f9_bytes32[0..],
                                                     );
-                                                    std.debug.print(
+                                                    vprint(
                                                         "prev_header_hash == curr.f9_bytes32 -> {s}\n",
                                                         .{if (matches_f9) "true" else "false"},
                                                     );
                                                     if (matches_f9) {
-                                                        std.debug.print("MATCH FIELD: f9\n", .{});
+                                                        vprint("MATCH FIELD: f9\n", .{});
                                                         match_any = true;
                                                     }
 
@@ -1438,22 +1477,22 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
                                                             prev_hash[0..],
                                                             curr_body.f2.bytes32[0..],
                                                         );
-                                                        std.debug.print(
+                                                        vprint(
                                                             "prev_header_hash == curr.f2 -> {s}\n",
                                                             .{if (matches_f2) "true" else "false"},
                                                         );
                                                         if (matches_f2) {
-                                                            std.debug.print("MATCH FIELD: f2\n", .{});
+                                                            vprint("MATCH FIELD: f2\n", .{});
                                                             match_any = true;
                                                         }
                                                     }
 
-                                                    std.debug.print(
+                                                    vprint(
                                                         "curr_prev_hash matches prev_header_hash={s}\n",
                                                         .{if (match_any) "true" else "false"},
                                                     );
                                                 }
-                                            } else if (prev_header_body_raw != null) {
+                                            } else if (prev_header_body_raw != null and DEBUG_VERBOSE) {
                                                 std.debug.print("consensus continuity: BROKEN\n", .{});
                                             }
                                             prev_header_hash_opt = header_hash;
@@ -1466,7 +1505,7 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
                                         if (prev_header_hash_opt) |prev_hash| {
                                             for (curr_candidates) |curr_item| {
                                                 if (std.mem.eql(u8, curr_item.bytes, prev_hash[0..])) {
-                                                    std.debug.print(
+                                                    vprint(
                                                         "consensus prev-hash field: header[{d}] matches prev_header_hash\n",
                                                         .{curr_item.index},
                                                     );
@@ -1506,9 +1545,9 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
                                                 prev_header_values[idx] = null;
                                             }
                                         }
-                                        printHeader32List("curr header32:", curr_candidates);
+                                        if (DEBUG_VERBOSE) printHeader32List("curr header32:", curr_candidates);
                                         if (prev_candidates) |prev| {
-                                            printHeader32List("prev header32:", prev);
+                                            if (DEBUG_VERBOSE) printHeader32List("prev header32:", prev);
                                             for (prev) |prev_item| {
                                                 for (curr_candidates) |curr_item| {
                                                     if (!prev_changed[prev_item.index] or
@@ -1517,21 +1556,21 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
                                                         continue;
                                                     }
                                                     if (std.mem.eql(u8, prev_item.bytes, curr_item.bytes)) {
-                                                        std.debug.print(
+                                                        vprint(
                                                             "link candidate: prev.header[{d}] -> curr.header[{d}]\n",
                                                             .{ prev_item.index, curr_item.index },
                                                         );
                                                     }
                                                     if (std.mem.eql(u8, prev_item.bytes, curr_item.bytes)) {
-                                                        std.debug.print(
+                                                        vprint(
                                                             "match32: prev.header[{d}] == curr.header[{d}]\n",
                                                             .{ prev_item.index, curr_item.index },
                                                         );
-                                                        std.debug.print(
+                                                        vprint(
                                                             "prev.header[{d}] == curr.header[{d}] (possible prev-hash link)\n",
                                                             .{ prev_item.index, curr_item.index },
                                                         );
-                                                        std.debug.print(
+                                                        vprint(
                                                             "matching indices: prev={d} curr={d}\n",
                                                             .{ prev_item.index, curr_item.index },
                                                         );
@@ -1542,38 +1581,90 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
                                         }
                                         prev_candidates = curr_candidates;
                                         prev_changed = curr_changed;
-                                        printTip(next_msg.roll_forward.tip);
+                                        if (DEBUG_VERBOSE) printTip(next_msg.roll_forward.tip);
                                         try storeTip(alloc, &last_tip, next_msg.roll_forward.tip);
                                         cursor_state.roll_forward_count += 1;
                                         cursor_state.updated_unix = std.time.timestamp();
                                         try cursor_store.save(cursor_state, cursor_path);
-                                        std.debug.print("cursor saved (roll forward)\n", .{});
-                                        awaiting_reply = false;
-                                        if (roll_forward_count == 2 and printed_continuity_verdict) {
-                                            return;
+                                        std.debug.print("CURSOR saved {s}\n", .{cursor_path});
+                                        roll_event_count += 1;
+                                        if (MAX_EVENTS) |max_events| {
+                                            if (roll_event_count >= max_events) return;
                                         }
+                                        var tip_prefix: [8]u8 = [_]u8{'?'} ** 8;
+                                        if (tip_hash) |hash| {
+                                            if (hash.len >= 4) {
+                                                _ = try std.fmt.bufPrint(
+                                                    &tip_prefix,
+                                                    "{s}",
+                                                    .{std.fmt.fmtSliceHexLower(hash[0..4])},
+                                                );
+                                            }
+                                        }
+                                        std.debug.print(
+                                            "ROLL FWD slot={d} block={d} tip={s} fwd={d} back={d}\n",
+                                            .{
+                                                cursor_state.slot,
+                                                cursor_state.block_no,
+                                                tip_prefix[0..],
+                                                cursor_state.roll_forward_count,
+                                                cursor_state.roll_backward_count,
+                                            },
+                                        );
+                                        awaiting_reply = false;
                                     },
                                     .roll_backward => {
-                                        std.debug.print("chainsync[{d}]: roll backward\n", .{steps});
-                                        printPoint(next_msg.roll_backward.point);
-                                        printTip(next_msg.roll_backward.tip);
+                                        vprint("chainsync[{d}]: roll backward\n", .{steps});
+                                        if (DEBUG_VERBOSE) {
+                                            printPoint(next_msg.roll_backward.point);
+                                            printTip(next_msg.roll_backward.tip);
+                                        }
                                         try storeTip(alloc, &last_tip, next_msg.roll_backward.tip);
                                         cursor_state.roll_backward_count += 1;
                                         cursor_state.updated_unix = std.time.timestamp();
                                         try cursor_store.save(cursor_state, cursor_path);
-                                        std.debug.print("cursor saved (roll backward)\n", .{});
+                                        std.debug.print("CURSOR saved {s}\n", .{cursor_path});
+                                        roll_event_count += 1;
+                                        if (MAX_EVENTS) |max_events| {
+                                            if (roll_event_count >= max_events) return;
+                                        }
+                                        const tip_hash = getTipHash(next_msg.roll_backward.tip);
+                                        if (getTipSlotBlock(next_msg.roll_backward.tip)) |tip_info| {
+                                            cursor_state.slot = tip_info.slot;
+                                            cursor_state.block_no = tip_info.block_no;
+                                        }
+                                        var tip_prefix: [8]u8 = [_]u8{'?'} ** 8;
+                                        if (tip_hash) |hash| {
+                                            if (hash.len >= 4) {
+                                                _ = try std.fmt.bufPrint(
+                                                    &tip_prefix,
+                                                    "{s}",
+                                                    .{std.fmt.fmtSliceHexLower(hash[0..4])},
+                                                );
+                                            }
+                                        }
+                                        std.debug.print(
+                                            "ROLL BACK slot={d} block={d} tip={s} fwd={d} back={d}\n",
+                                            .{
+                                                cursor_state.slot,
+                                                cursor_state.block_no,
+                                                tip_prefix[0..],
+                                                cursor_state.roll_forward_count,
+                                                cursor_state.roll_backward_count,
+                                            },
+                                        );
                                         awaiting_reply = false;
                                     },
                                     else => {
-                                        std.debug.print("chainsync[{d}]: no response\n", .{steps});
+                                        vprint("chainsync[{d}]: no response\n", .{steps});
                                         awaiting_reply = false;
                                     },
                                 }
                             } else if (next_hdr.proto == 8) {
-                                std.debug.print("keepalive: rx (ignored)\n", .{});
+                                vprint("keepalive: rx (ignored)\n", .{});
                                 continue;
                             } else {
-                                std.debug.print("mux: rx unexpected proto={d}\n", .{next_hdr.proto});
+                                vprint("mux: rx unexpected proto={d}\n", .{next_hdr.proto});
                                 continue;
                             }
                         }
@@ -1581,17 +1672,17 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
                     return;
                 },
                 .intersect_not_found => {
-                    std.debug.print("chainsync: intersect not found\n", .{});
+                    vprint("chainsync: intersect not found\n", .{});
                     return;
                 },
-                else => std.debug.print("chainsync: no response\n", .{}),
+                else => vprint("chainsync: no response\n", .{}),
             }
             return;
         } else if (hdr.proto == 8) {
-            std.debug.print("keepalive: rx (ignored)\n", .{});
+            vprint("keepalive: rx (ignored)\n", .{});
             continue;
         } else {
-            std.debug.print("mux: rx unexpected proto={d}\n", .{hdr.proto});
+            vprint("mux: rx unexpected proto={d}\n", .{hdr.proto});
             continue;
         }
     }
