@@ -14,11 +14,345 @@ const HeaderCandidate = struct {
     bytes: []u8,
 };
 
+const HeaderBodyRaw = struct {
+    pub const F2 = union(enum) { null, bytes32: [32]u8 };
+
+    f0_u64: u64,
+    f1_u64: u64,
+    f2: F2,
+    f3_bytes32: [32]u8,
+    f4_bytes32: [32]u8,
+    f5: cbor.Term,
+    f6: cbor.Term,
+    f7_u64: u64,
+    f8_bytes32: [32]u8,
+    f9_bytes32: [32]u8,
+    f10_u64: u64,
+    f11_u64: u64,
+    f12_bytes64: [64]u8,
+    f13_u64: u64,
+    f14_u64: u64,
+};
+
+const HeaderCborInfo = struct {
+    cbor_bytes: []u8,
+    prev_hash: ?[32]u8,
+};
+
+const HeaderBodyRawSnapshot = struct {
+    f0_u64: u64,
+    f1_u64: u64,
+    f2: HeaderBodyRaw.F2,
+    f3_bytes32: [32]u8,
+    f4_bytes32: [32]u8,
+    f7_u64: u64,
+    f8_bytes32: [32]u8,
+    f9_bytes32: [32]u8,
+    f10_u64: u64,
+    f11_u64: u64,
+    f12_bytes64: [64]u8,
+    f13_u64: u64,
+    f14_u64: u64,
+};
+
 fn freeHeaderCandidates(alloc: std.mem.Allocator, candidates: []HeaderCandidate) void {
     for (candidates) |candidate| {
         alloc.free(candidate.bytes);
     }
     alloc.free(candidates);
+}
+
+fn headerHashBlake2b256(header_cbor_bytes: []const u8) [32]u8 {
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.blake2.Blake2b256.hash(header_cbor_bytes, &digest, .{});
+    return digest;
+}
+
+fn freeHeaderValues(alloc: std.mem.Allocator, values: *[15]?[]u8) void {
+    for (values) |maybe_bytes| {
+        if (maybe_bytes) |bytes| alloc.free(bytes);
+    }
+    values.* = [_]?[]u8{null} ** 15;
+}
+
+fn printHeader32List(label: []const u8, candidates: []HeaderCandidate) void {
+    std.debug.print("{s} [", .{label});
+    for (candidates, 0..) |candidate, i| {
+        if (i > 0) std.debug.print(",", .{});
+        std.debug.print("{d}", .{candidate.index});
+    }
+    std.debug.print("]\n", .{});
+}
+
+fn printHeaderBodyRaw(body: HeaderBodyRaw) void {
+    std.debug.print("HeaderBodyRaw:\n", .{});
+    std.debug.print("  f0_u64={d}\n", .{body.f0_u64});
+    std.debug.print("  f1_u64={d}\n", .{body.f1_u64});
+    switch (body.f2) {
+        .null => std.debug.print("  f2=null\n", .{}),
+        .bytes32 => |bytes| std.debug.print(
+            "  f2=bytes32 {s}\n",
+            .{std.fmt.fmtSliceHexLower(bytes[0..8])},
+        ),
+    }
+    std.debug.print("  f3_bytes32={s}\n", .{std.fmt.fmtSliceHexLower(body.f3_bytes32[0..8])});
+    std.debug.print("  f4_bytes32={s}\n", .{std.fmt.fmtSliceHexLower(body.f4_bytes32[0..8])});
+    std.debug.print("  f5=array len=2 (opaque)\n", .{});
+    std.debug.print("  f6=array len=2 (opaque)\n", .{});
+    std.debug.print("  f7_u64={d}\n", .{body.f7_u64});
+    std.debug.print("  f8_bytes32={s}\n", .{std.fmt.fmtSliceHexLower(body.f8_bytes32[0..8])});
+    std.debug.print("  f9_bytes32={s}\n", .{std.fmt.fmtSliceHexLower(body.f9_bytes32[0..8])});
+    std.debug.print("  f10_u64={d}\n", .{body.f10_u64});
+    std.debug.print("  f11_u64={d}\n", .{body.f11_u64});
+    std.debug.print("  f12_bytes64={s}\n", .{std.fmt.fmtSliceHexLower(body.f12_bytes64[0..8])});
+    std.debug.print("  f13_u64={d}\n", .{body.f13_u64});
+    std.debug.print("  f14_u64={d}\n", .{body.f14_u64});
+}
+
+fn printHeaderBodyRawStability(prev: HeaderBodyRawSnapshot, curr: HeaderBodyRawSnapshot, structure_ok: bool) void {
+    if (prev.f0_u64 != curr.f0_u64) {
+        const delta: i64 = @as(i64, @intCast(curr.f0_u64)) - @as(i64, @intCast(prev.f0_u64));
+        std.debug.print("u64 f0: prev={d} curr={d} delta={d}\n", .{ prev.f0_u64, curr.f0_u64, delta });
+    }
+    if (prev.f1_u64 != curr.f1_u64) {
+        const delta: i64 = @as(i64, @intCast(curr.f1_u64)) - @as(i64, @intCast(prev.f1_u64));
+        std.debug.print("u64 f1: prev={d} curr={d} delta={d}\n", .{ prev.f1_u64, curr.f1_u64, delta });
+    }
+    if (prev.f7_u64 != curr.f7_u64) {
+        const delta: i64 = @as(i64, @intCast(curr.f7_u64)) - @as(i64, @intCast(prev.f7_u64));
+        std.debug.print("u64 f7: prev={d} curr={d} delta={d}\n", .{ prev.f7_u64, curr.f7_u64, delta });
+    }
+    if (prev.f10_u64 != curr.f10_u64) {
+        const delta: i64 = @as(i64, @intCast(curr.f10_u64)) - @as(i64, @intCast(prev.f10_u64));
+        std.debug.print("u64 f10: prev={d} curr={d} delta={d}\n", .{ prev.f10_u64, curr.f10_u64, delta });
+    }
+    if (prev.f11_u64 != curr.f11_u64) {
+        const delta: i64 = @as(i64, @intCast(curr.f11_u64)) - @as(i64, @intCast(prev.f11_u64));
+        std.debug.print("u64 f11: prev={d} curr={d} delta={d}\n", .{ prev.f11_u64, curr.f11_u64, delta });
+    }
+    if (prev.f13_u64 != curr.f13_u64) {
+        const delta: i64 = @as(i64, @intCast(curr.f13_u64)) - @as(i64, @intCast(prev.f13_u64));
+        std.debug.print("u64 f13: prev={d} curr={d} delta={d}\n", .{ prev.f13_u64, curr.f13_u64, delta });
+    }
+    if (prev.f14_u64 != curr.f14_u64) {
+        const delta: i64 = @as(i64, @intCast(curr.f14_u64)) - @as(i64, @intCast(prev.f14_u64));
+        std.debug.print("u64 f14: prev={d} curr={d} delta={d}\n", .{ prev.f14_u64, curr.f14_u64, delta });
+    }
+
+    const f3_changed = !std.mem.eql(u8, prev.f3_bytes32[0..], curr.f3_bytes32[0..]);
+    std.debug.print(
+        "bytes32 f3 changed={s} prefix={s}\n",
+        .{ if (f3_changed) "true" else "false", std.fmt.fmtSliceHexLower(curr.f3_bytes32[0..8]) },
+    );
+    const f4_changed = !std.mem.eql(u8, prev.f4_bytes32[0..], curr.f4_bytes32[0..]);
+    std.debug.print(
+        "bytes32 f4 changed={s} prefix={s}\n",
+        .{ if (f4_changed) "true" else "false", std.fmt.fmtSliceHexLower(curr.f4_bytes32[0..8]) },
+    );
+    const f8_changed = !std.mem.eql(u8, prev.f8_bytes32[0..], curr.f8_bytes32[0..]);
+    std.debug.print(
+        "bytes32 f8 changed={s} prefix={s}\n",
+        .{ if (f8_changed) "true" else "false", std.fmt.fmtSliceHexLower(curr.f8_bytes32[0..8]) },
+    );
+    const f9_changed = !std.mem.eql(u8, prev.f9_bytes32[0..], curr.f9_bytes32[0..]);
+    std.debug.print(
+        "bytes32 f9 changed={s} prefix={s}\n",
+        .{ if (f9_changed) "true" else "false", std.fmt.fmtSliceHexLower(curr.f9_bytes32[0..8]) },
+    );
+
+    switch (curr.f2) {
+        .null => std.debug.print("f2 kind: null\n", .{}),
+        .bytes32 => std.debug.print("f2 kind: bytes32\n", .{}),
+    }
+
+    std.debug.print(
+        "stability: f8_bytes32 constant={s}\n",
+        .{if (f8_changed) "false" else "true"},
+    );
+
+    const slot_delta: i64 = @as(i64, @intCast(curr.f0_u64)) - @as(i64, @intCast(prev.f0_u64));
+    const protocol_stable = prev.f7_u64 == curr.f7_u64;
+    const body_hash_changed = !std.mem.eql(u8, prev.f12_bytes64[0..], curr.f12_bytes64[0..]);
+    if (prev.f2 == .bytes32 and curr.f2 == .bytes32) {
+        const stable = std.mem.eql(u8, prev.f2.bytes32[0..], curr.f2.bytes32[0..]);
+        std.debug.print(
+            "bytes32 {s}: header[2]\n",
+            .{if (stable) "stable" else "changed"},
+        );
+    }
+    {
+        const stable = std.mem.eql(u8, prev.f3_bytes32[0..], curr.f3_bytes32[0..]);
+        std.debug.print(
+            "bytes32 {s}: header[3]\n",
+            .{if (stable) "stable" else "changed"},
+        );
+    }
+    {
+        const stable = std.mem.eql(u8, prev.f4_bytes32[0..], curr.f4_bytes32[0..]);
+        std.debug.print(
+            "bytes32 {s}: header[4]\n",
+            .{if (stable) "stable" else "changed"},
+        );
+    }
+    {
+        const stable = std.mem.eql(u8, prev.f8_bytes32[0..], curr.f8_bytes32[0..]);
+        std.debug.print(
+            "bytes32 {s}: header[8]\n",
+            .{if (stable) "stable" else "changed"},
+        );
+    }
+    {
+        const stable = std.mem.eql(u8, prev.f9_bytes32[0..], curr.f9_bytes32[0..]);
+        std.debug.print(
+            "bytes32 {s}: header[9]\n",
+            .{if (stable) "stable" else "changed"},
+        );
+    }
+
+    std.debug.print("consensus slot delta={d}\n", .{slot_delta});
+    std.debug.print("consensus protocol version stable={s}\n", .{if (protocol_stable) "true" else "false"});
+    std.debug.print("consensus body hash changed={s}\n", .{if (body_hash_changed) "true" else "false"});
+    const leader_changed = !std.mem.eql(u8, prev.f3_bytes32[0..], curr.f3_bytes32[0..]) or
+        !std.mem.eql(u8, prev.f4_bytes32[0..], curr.f4_bytes32[0..]);
+    std.debug.print("leader changed={s}\n", .{if (leader_changed) "true" else "false"});
+    const ok = structure_ok and slot_delta >= 1 and protocol_stable;
+    std.debug.print("consensus continuity: {s}\n", .{if (ok) "OK" else "BROKEN"});
+}
+
+fn decodeHeaderBodyRaw(term: cbor.Term) ?HeaderBodyRaw {
+    if (term != .array) return null;
+    const items = term.array;
+    if (items.len != 15) return null;
+
+    if (items[0] != .u64) return null;
+    if (items[1] != .u64) return null;
+
+    var f2: HeaderBodyRaw.F2 = undefined;
+    if (items[2] == .null) {
+        f2 = .null;
+    } else if (items[2] == .bytes and items[2].bytes.len == 32) {
+        var bytes32: [32]u8 = undefined;
+        std.mem.copyForwards(u8, bytes32[0..], items[2].bytes);
+        f2 = .{ .bytes32 = bytes32 };
+    } else {
+        return null;
+    }
+
+    if (items[3] != .bytes or items[3].bytes.len != 32) return null;
+    if (items[4] != .bytes or items[4].bytes.len != 32) return null;
+    if (items[5] != .array or items[5].array.len != 2) return null;
+    if (items[6] != .array or items[6].array.len != 2) return null;
+    if (items[7] != .u64) return null;
+    if (items[8] != .bytes or items[8].bytes.len != 32) return null;
+    if (items[9] != .bytes or items[9].bytes.len != 32) return null;
+    if (items[10] != .u64) return null;
+    if (items[11] != .u64) return null;
+    if (items[12] != .bytes or items[12].bytes.len != 64) return null;
+    if (items[13] != .u64) return null;
+    if (items[14] != .u64) return null;
+
+    var f3_bytes32: [32]u8 = undefined;
+    var f4_bytes32: [32]u8 = undefined;
+    var f8_bytes32: [32]u8 = undefined;
+    var f9_bytes32: [32]u8 = undefined;
+    var f12_bytes64: [64]u8 = undefined;
+    std.mem.copyForwards(u8, f3_bytes32[0..], items[3].bytes);
+    std.mem.copyForwards(u8, f4_bytes32[0..], items[4].bytes);
+    std.mem.copyForwards(u8, f8_bytes32[0..], items[8].bytes);
+    std.mem.copyForwards(u8, f9_bytes32[0..], items[9].bytes);
+    std.mem.copyForwards(u8, f12_bytes64[0..], items[12].bytes);
+
+    return HeaderBodyRaw{
+        .f0_u64 = items[0].u64,
+        .f1_u64 = items[1].u64,
+        .f2 = f2,
+        .f3_bytes32 = f3_bytes32,
+        .f4_bytes32 = f4_bytes32,
+        .f5 = items[5],
+        .f6 = items[6],
+        .f7_u64 = items[7].u64,
+        .f8_bytes32 = f8_bytes32,
+        .f9_bytes32 = f9_bytes32,
+        .f10_u64 = items[10].u64,
+        .f11_u64 = items[11].u64,
+        .f12_bytes64 = f12_bytes64,
+        .f13_u64 = items[13].u64,
+        .f14_u64 = items[14].u64,
+    };
+}
+
+fn headerBodyRawSnapshot(body: HeaderBodyRaw) HeaderBodyRawSnapshot {
+    return HeaderBodyRawSnapshot{
+        .f0_u64 = body.f0_u64,
+        .f1_u64 = body.f1_u64,
+        .f2 = body.f2,
+        .f3_bytes32 = body.f3_bytes32,
+        .f4_bytes32 = body.f4_bytes32,
+        .f7_u64 = body.f7_u64,
+        .f8_bytes32 = body.f8_bytes32,
+        .f9_bytes32 = body.f9_bytes32,
+        .f10_u64 = body.f10_u64,
+        .f11_u64 = body.f11_u64,
+        .f12_bytes64 = body.f12_bytes64,
+        .f13_u64 = body.f13_u64,
+        .f14_u64 = body.f14_u64,
+    };
+}
+
+fn extractHeaderBodyRawSnapshot(alloc: std.mem.Allocator, block: cbor.Term) ?HeaderBodyRawSnapshot {
+    if (block != .array) return null;
+    const items = block.array;
+    if (items.len < 2) return null;
+
+    const block_bytes = blk: {
+        if (items[1] == .bytes) break :blk items[1].bytes;
+        if (items[1] == .tag and items[1].tag.tag == 24 and items[1].tag.value.* == .bytes) {
+            break :blk items[1].tag.value.*.bytes;
+        }
+        return null;
+    };
+
+    const inner_bytes = getTag24InnerBytes(block_bytes) orelse block_bytes;
+    var fbs = std.io.fixedBufferStream(inner_bytes);
+    const top = cbor.decode(alloc, fbs.reader()) catch return null;
+    defer cbor.free(top, alloc);
+
+    if (top != .array) return null;
+    const top_items = top.array;
+    if (top_items.len == 0 or top_items[0] != .array) return null;
+    if (decodeHeaderBodyRaw(top_items[0])) |body| {
+        return headerBodyRawSnapshot(body);
+    }
+    return null;
+}
+
+fn captureFirstRollForward(
+    alloc: std.mem.Allocator,
+    tip: cbor.Term,
+    header_cbor_bytes: []const u8,
+    prev_hash: ?[32]u8,
+) void {
+    _ = alloc;
+    const tip_hash = getTipHash(tip);
+    if (tip_hash) |hash| {
+        if (hash.len == 32) {
+            std.debug.print("tip_hash_full={s}\n", .{std.fmt.fmtSliceHexLower(hash)});
+        }
+    }
+
+    std.debug.print("header_cbor_len={d}\n", .{header_cbor_bytes.len});
+    std.debug.print(
+        "header_cbor_hex={s}\n",
+        .{std.fmt.fmtSliceHexLower(header_cbor_bytes)},
+    );
+
+    const header_hash = headerHashBlake2b256(header_cbor_bytes);
+    std.debug.print("header_hash={s}\n", .{std.fmt.fmtSliceHexLower(&header_hash)});
+    if (prev_hash) |hash| {
+        std.debug.print("prev_hash={s}\n", .{std.fmt.fmtSliceHexLower(&hash)});
+    } else {
+        std.debug.print("prev_hash=(null)\n", .{});
+    }
 }
 
 fn getTag24InnerBytes(bytes: []const u8) ?[]const u8 {
@@ -503,6 +837,11 @@ fn printInnerBytes(alloc: std.mem.Allocator, inner: []const u8, tip_hash: ?[]con
     defer cbor.free(t1, alloc);
 
     printTermShallow(0, t0);
+    if (decodeHeaderBodyRaw(t0)) |header_body| {
+        printHeaderBodyRaw(header_body);
+    } else {
+        std.debug.print("HeaderBodyRaw parse failed\n", .{});
+    }
     printHeaderShallow(alloc, t0, tip_hash);
     printTermShallow(1, t1);
     if (t1 == .bytes) {
@@ -817,10 +1156,74 @@ fn printHeaderItemNested(parent: usize, index: usize, term: cbor.Term) void {
     }
 }
 
+fn extractHeaderCborInfo(alloc: std.mem.Allocator, block: cbor.Term) ?HeaderCborInfo {
+    if (block != .array) return null;
+    const items = block.array;
+    if (items.len < 2) return null;
+
+    const block_bytes = blk: {
+        if (items[1] == .bytes) break :blk items[1].bytes;
+        if (items[1] == .tag and items[1].tag.tag == 24 and items[1].tag.value.* == .bytes) {
+            break :blk items[1].tag.value.*.bytes;
+        }
+        return null;
+    };
+
+    const inner_bytes = getTag24InnerBytes(block_bytes) orelse block_bytes;
+    var fbs = std.io.fixedBufferStream(inner_bytes);
+    const top = cbor.decode(alloc, fbs.reader()) catch return null;
+    defer cbor.free(top, alloc);
+
+    if (top != .array) return null;
+    const top_items = top.array;
+    if (top_items.len == 0 or top_items[0] != .array) return null;
+    if (top_items[0].array.len != 15) return null;
+
+    var list = std.ArrayList(u8).init(alloc);
+    errdefer list.deinit();
+    cbor.encode(top_items[0], list.writer()) catch {
+        list.deinit();
+        return null;
+    };
+    const cbor_bytes = list.toOwnedSlice() catch {
+        list.deinit();
+        return null;
+    };
+
+    var prev_hash: ?[32]u8 = null;
+    const header_items = top_items[0].array;
+    if (header_items[8] == .bytes and header_items[8].bytes.len == 32) {
+        var bytes32: [32]u8 = undefined;
+        std.mem.copyForwards(u8, bytes32[0..], header_items[8].bytes);
+        prev_hash = bytes32;
+    }
+
+    return HeaderCborInfo{
+        .cbor_bytes = cbor_bytes,
+        .prev_hash = prev_hash,
+    };
+}
+
 fn printHeaderShallow(alloc: std.mem.Allocator, term: cbor.Term, tip_hash: ?[]const u8) void {
     if (term != .array) return;
     const items = term.array;
     if (items.len != 15) return;
+    // HeaderBody index hints (suspected):
+    //  0: slot
+    //  1: block_no
+    //  2: prev_hash (Maybe)
+    //  3: issuer_vkey
+    //  4: vrf_vkey
+    //  5: vrf_result
+    //  6: kes_info
+    //  7: era
+    //  8: constant_nonce / reserved
+    //  9: metadata_hash
+    // 10: body_size?
+    // 11: body_hash?
+    // 12: opcert / protocol?
+    // 13: proto_version?
+    // 14: extra / reserved
     var i: usize = 0;
     while (i < items.len and i < 15) : (i += 1) {
         printHeaderItem(i, items[i]);
@@ -1041,6 +1444,12 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
     };
     var prev_candidates: ?[]HeaderCandidate = null;
     defer if (prev_candidates) |candidates| freeHeaderCandidates(alloc, candidates);
+    var prev_header_values: [15]?[]u8 = [_]?[]u8{null} ** 15;
+    defer freeHeaderValues(alloc, &prev_header_values);
+    var prev_changed: [15]bool = [_]bool{false} ** 15;
+    var captured_first_rollforward = false;
+    var prev_header_hash_opt: ?[32]u8 = null;
+    var prev_header_body_raw: ?HeaderBodyRawSnapshot = null;
 
     const timeout_ms: u32 = 10_000;
     tcp_bt.setReadTimeout(&bt, timeout_ms) catch {};
@@ -1157,14 +1566,109 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
                                         const tip_hash = getTipHash(next_msg.roll_forward.tip);
                                         printBlockShallow(next_msg.roll_forward.block);
                                         printBlockHash(alloc, next_msg.roll_forward.block, tip_hash);
+                                        if (extractHeaderCborInfo(alloc, next_msg.roll_forward.block)) |header_info| {
+                                            defer alloc.free(header_info.cbor_bytes);
+                                            const header_hash = headerHashBlake2b256(header_info.cbor_bytes);
+                                            if (!captured_first_rollforward) {
+                                                captured_first_rollforward = true;
+                                                captureFirstRollForward(
+                                                    alloc,
+                                                    next_msg.roll_forward.tip,
+                                                    header_info.cbor_bytes,
+                                                    header_info.prev_hash,
+                                                );
+                                            }
+                                            if (prev_header_hash_opt) |prev_hash| {
+                                                if (header_info.prev_hash) |next_prev_hash| {
+                                                    const matches = std.mem.eql(u8, prev_hash[0..], next_prev_hash[0..]);
+                                                    std.debug.print(
+                                                        "header_hash == next.prev_hash ({s})\n",
+                                                        .{if (matches) "true" else "false"},
+                                                    );
+                                                }
+                                            }
+                                            const curr_body_opt = extractHeaderBodyRawSnapshot(
+                                                alloc,
+                                                next_msg.roll_forward.block,
+                                            );
+                                            if (curr_body_opt) |curr_body| {
+                                                if (prev_header_body_raw) |prev_body| {
+                                                    printHeaderBodyRawStability(prev_body, curr_body, true);
+                                                }
+                                                prev_header_body_raw = curr_body;
+                                            } else if (prev_header_body_raw != null) {
+                                                std.debug.print("consensus continuity: BROKEN\n", .{});
+                                            }
+                                            prev_header_hash_opt = header_hash;
+                                        }
                                         const curr_candidates = try collectHeaderCandidates(
                                             alloc,
                                             next_msg.roll_forward.block,
                                         );
+                                        if (prev_header_hash_opt) |prev_hash| {
+                                            for (curr_candidates) |curr_item| {
+                                                if (std.mem.eql(u8, curr_item.bytes, prev_hash[0..])) {
+                                                    std.debug.print(
+                                                        "consensus prev-hash field: header[{d}] matches prev_header_hash\n",
+                                                        .{curr_item.index},
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        var curr_changed: [15]bool = [_]bool{false} ** 15;
+                                        var curr_present: [15]bool = [_]bool{false} ** 15;
+                                        for (curr_candidates) |curr_item| {
+                                            if (curr_item.index < 15) {
+                                                curr_present[curr_item.index] = true;
+                                                if (prev_header_values[curr_item.index]) |prev_bytes| {
+                                                    curr_changed[curr_item.index] =
+                                                        !std.mem.eql(u8, prev_bytes, curr_item.bytes);
+                                                } else {
+                                                    curr_changed[curr_item.index] = true;
+                                                }
+                                            }
+                                        }
+                                        for (curr_candidates) |curr_item| {
+                                            if (curr_item.index < 15) {
+                                                if (prev_header_values[curr_item.index]) |prev_bytes| {
+                                                    alloc.free(prev_bytes);
+                                                }
+                                                prev_header_values[curr_item.index] = try alloc.dupe(
+                                                    u8,
+                                                    curr_item.bytes,
+                                                );
+                                            }
+                                        }
+                                        var idx: usize = 0;
+                                        while (idx < prev_header_values.len) : (idx += 1) {
+                                            if (!curr_present[idx]) {
+                                                if (prev_header_values[idx]) |prev_bytes| {
+                                                    alloc.free(prev_bytes);
+                                                }
+                                                prev_header_values[idx] = null;
+                                            }
+                                        }
+                                        printHeader32List("curr header32:", curr_candidates);
                                         if (prev_candidates) |prev| {
+                                            printHeader32List("prev header32:", prev);
                                             for (prev) |prev_item| {
                                                 for (curr_candidates) |curr_item| {
+                                                    if (!prev_changed[prev_item.index] or
+                                                        !curr_changed[curr_item.index])
+                                                    {
+                                                        continue;
+                                                    }
                                                     if (std.mem.eql(u8, prev_item.bytes, curr_item.bytes)) {
+                                                        std.debug.print(
+                                                            "link candidate: prev.header[{d}] -> curr.header[{d}]\n",
+                                                            .{ prev_item.index, curr_item.index },
+                                                        );
+                                                    }
+                                                    if (std.mem.eql(u8, prev_item.bytes, curr_item.bytes)) {
+                                                        std.debug.print(
+                                                            "match32: prev.header[{d}] == curr.header[{d}]\n",
+                                                            .{ prev_item.index, curr_item.index },
+                                                        );
                                                         std.debug.print(
                                                             "prev.header[{d}] == curr.header[{d}] (possible prev-hash link)\n",
                                                             .{ prev_item.index, curr_item.index },
@@ -1179,6 +1683,7 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
                                             freeHeaderCandidates(alloc, prev);
                                         }
                                         prev_candidates = curr_candidates;
+                                        prev_changed = curr_changed;
                                         printTip(next_msg.roll_forward.tip);
                                         try storeTip(alloc, &last_tip, next_msg.roll_forward.tip);
                                         awaiting_reply = false;
