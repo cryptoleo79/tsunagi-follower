@@ -1071,7 +1071,6 @@ fn onRollForward(
     _ = tip_slot;
     _ = tip_block;
     _ = tip_hash32;
-    _ = header_hash32;
 
     const ctx = ctxFromAny(ctx_any);
     const alloc = ctx.alloc;
@@ -1132,6 +1131,13 @@ fn onRollForward(
             return;
         }
     }
+    var header_hash_hex: [64]u8 = [_]u8{'0'} ** 64;
+    _ = try std.fmt.bufPrint(
+        &header_hash_hex,
+        "{s}",
+        .{std.fmt.fmtSliceHexLower(&header_hash32)},
+    );
+    ctx.base.cursor.header_hash_hex = header_hash_hex;
     if (new_slot) |slot| ctx.base.cursor.slot = slot;
     if (new_block_no) |block_no| ctx.base.cursor.block_no = block_no;
     if (has_tip_hash) {
@@ -1143,12 +1149,6 @@ fn onRollForward(
     }
     if (follower.extractHeaderCborInfo(alloc, block)) |header_info| {
         defer alloc.free(header_info.cbor_bytes);
-        const header_hash = follower.headerHashBlake2b256(header_info.cbor_bytes);
-        _ = try std.fmt.bufPrint(
-            &ctx.base.cursor.header_hash_hex,
-            "{s}",
-            .{std.fmt.fmtSliceHexLower(&header_hash)},
-        );
         if (!ctx.captured_first_rollforward) {
             ctx.captured_first_rollforward = true;
             if (DEBUG_VERBOSE) {
@@ -1270,7 +1270,7 @@ fn onRollForward(
         } else if (ctx.prev_header_body_raw != null and DEBUG_VERBOSE) {
             std.debug.print("consensus continuity: BROKEN\n", .{});
         }
-        ctx.prev_header_hash_opt = header_hash;
+        ctx.prev_header_hash_opt = header_hash32;
         ctx.prev_header_cbor_len = header_info.cbor_bytes.len;
     }
     const curr_candidates = try collectHeaderCandidates(
@@ -1357,6 +1357,13 @@ fn onRollForward(
     ctx.prev_candidates = curr_candidates;
     ctx.prev_changed = curr_changed;
     if (DEBUG_VERBOSE) printTip(tip);
+    var header_prefix: [8]u8 = [_]u8{'?'} ** 8;
+    _ = try std.fmt.bufPrint(
+        &header_prefix,
+        "{s}",
+        .{std.fmt.fmtSliceHexLower(header_hash32[0..4])},
+    );
+    std.debug.print("header_hash_prefix={s}\n", .{header_prefix[0..]});
     ctx.base.cursor.roll_forward_count += 1;
     ctx.base.cursor.updated_unix = std.time.timestamp();
     try cursor_store.save(ctx.base.cursor, cursor_path);
@@ -1367,7 +1374,7 @@ fn onRollForward(
         ctx.base.cursor.slot,
         ctx.base.cursor.block_no,
         ctx.base.cursor.tip_hash_hex[0..],
-        ctx.base.cursor.header_hash_hex[0..],
+        header_hash_hex[0..],
     );
     std.debug.print("JOURNAL append fwd\n", .{});
     var tip_prefix: [8]u8 = [_]u8{'?'} ** 8;

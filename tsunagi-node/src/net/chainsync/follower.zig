@@ -11,6 +11,7 @@ const cursor_store = @import("../ledger/cursor.zig");
 
 const chainsync_proto: u16 = 2;
 const keepalive_proto: u16 = 8;
+const DEBUG_VERBOSE = false;
 
 pub const Context = struct {
     cursor: cursor_store.Cursor,
@@ -240,6 +241,32 @@ pub fn extractHeaderCborInfo(alloc: std.mem.Allocator, block: cbor.Term) ?Header
         .cbor_bytes = cbor_bytes,
         .prev_hash = prev_hash,
     };
+}
+
+const HeaderHashError = error{
+    InvalidBlock,
+    InvalidHeader,
+};
+
+fn computeHeaderHash32(alloc: std.mem.Allocator, header_cbor_bytes: []const u8) ?[32]u8 {
+    var fbs = std.io.fixedBufferStream(header_cbor_bytes);
+    const top = cbor.decode(alloc, fbs.reader()) catch return null;
+    defer cbor.free(top, alloc);
+
+    if (top != .array) return null;
+    const top_items = top.array;
+    if (top_items.len == 0) return null;
+    if (top_items[0] != .array) return null;
+
+    // Cardano header body is usually 15 items, but NOT guaranteed
+    if (top_items[0].array.len < 10) {
+        // too small to be a valid header body
+        return null;
+    }
+
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.blake2.Blake2b256.hash(header_cbor_bytes, &digest, .{});
+    return digest;
 }
 
 fn cloneTerm(alloc: std.mem.Allocator, term: cbor.Term) !cbor.Term {
@@ -481,9 +508,39 @@ pub fn run(
                                             tip_hash32_value = hash;
                                         }
 
-                                        var header_hash32_value: [32]u8 = std.mem.zeroes([32]u8);
-                                        if (headerHash32(alloc, next_msg.roll_forward.block)) |hash| {
-                                            header_hash32_value = hash;
+                                        const header_hash32_value = blk: {
+                                            const block = next_msg.roll_forward.block;
+                                            if (block != .array) return HeaderHashError.InvalidBlock;
+                                            const items = block.array;
+                                            if (items.len < 2) return HeaderHashError.InvalidBlock;
+
+                                            const block_bytes = blk_bytes: {
+                                                if (items[1] == .bytes) break :blk_bytes items[1].bytes;
+                                                if (items[1] == .tag and
+                                                    items[1].tag.tag == 24 and
+                                                    items[1].tag.value.* == .bytes)
+                                                {
+                                                    break :blk_bytes items[1].tag.value.*.bytes;
+                                                }
+                                                return HeaderHashError.InvalidBlock;
+                                            };
+
+                                            const inner_bytes = header_raw.getTag24InnerBytes(block_bytes) orelse block_bytes;
+                                            break :blk computeHeaderHash32(alloc, inner_bytes) orelse
+                                                return HeaderHashError.InvalidHeader;
+                                        };
+
+                                        if (DEBUG_VERBOSE) {
+                                            var header_prefix: [8]u8 = [_]u8{'?'} ** 8;
+                                            _ = try std.fmt.bufPrint(
+                                                &header_prefix,
+                                                "{s}",
+                                                .{std.fmt.fmtSliceHexLower(header_hash32_value[0..4])},
+                                            );
+                                            std.debug.print(
+                                                "engine header_hash_prefix={s}\n",
+                                                .{header_prefix[0..]},
+                                            );
                                         }
 
                                         ctx.roll_forward_count += 1;
