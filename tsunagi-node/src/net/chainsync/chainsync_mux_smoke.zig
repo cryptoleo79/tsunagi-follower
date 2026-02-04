@@ -1381,6 +1381,8 @@ fn onRollForward(
         ctx.base.cursor.block_no,
         ctx.base.cursor.tip_hash_hex[0..],
         header_hash_hex[0..],
+        tx_count,
+        ctx.utxo.count(),
     );
     std.debug.print("JOURNAL append fwd\n", .{});
     const now = std.time.timestamp();

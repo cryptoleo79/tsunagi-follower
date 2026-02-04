@@ -25,6 +25,8 @@ pub fn appendRollForward(
     block_no: u64,
     tip_hash_hex: []const u8,
     header_hash_hex: []const u8,
+    tx_count: u64,
+    utxo_count: u64,
 ) !void {
     _ = path;
     var file = try openAppend();
@@ -32,8 +34,8 @@ pub fn appendRollForward(
 
     const writer = file.writer();
     try writer.print(
-        "{{\"type\":\"roll_forward\",\"ts\":{d},\"slot\":{d},\"block_no\":{d},\"tip_hash_hex\":\"{s}\",\"header_hash_hex\":\"{s}\"}}\n",
-        .{ ts, slot, block_no, tip_hash_hex, header_hash_hex },
+        "{{\"type\":\"roll_forward\",\"ts\":{d},\"slot\":{d},\"block_no\":{d},\"tip_hash_hex\":\"{s}\",\"header_hash_hex\":\"{s}\",\"tx_count\":{d},\"utxo_count\":{d}}}\n",
+        .{ ts, slot, block_no, tip_hash_hex, header_hash_hex, tx_count, utxo_count },
     );
 }
 
