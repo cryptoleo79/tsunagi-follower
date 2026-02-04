@@ -145,13 +145,13 @@ fn decodeTerm(alloc: std.mem.Allocator, reader: anytype) !Term {
             const len = try decodeLen(addl, reader);
             const count: usize = @intCast(len);
             const items = try alloc.alloc(Term, count);
+            var parsed: usize = 0;
             errdefer {
-                for (items) |item| free(item, alloc);
+                for (items[0..parsed]) |item| free(item, alloc);
                 alloc.free(items);
             }
-            var i: usize = 0;
-            while (i < count) : (i += 1) {
-                items[i] = try decodeTerm(alloc, reader);
+            while (parsed < count) : (parsed += 1) {
+                items[parsed] = try decodeTerm(alloc, reader);
             }
             break :blk Term{ .array = items };
         },
@@ -159,15 +159,15 @@ fn decodeTerm(alloc: std.mem.Allocator, reader: anytype) !Term {
             const len = try decodeLen(addl, reader);
             const count: usize = @intCast(len);
             const entries = try alloc.alloc(MapEntry, count);
+            var parsed: usize = 0;
             errdefer {
-                for (entries) |e| free(e.value, alloc);
+                for (entries[0..parsed]) |e| free(e.value, alloc);
                 alloc.free(entries);
             }
-            var i: usize = 0;
-            while (i < count) : (i += 1) {
+            while (parsed < count) : (parsed += 1) {
                 const key = try decodeUnsigned(reader);
                 const value = try decodeTerm(alloc, reader);
-                entries[i] = .{ .key = key, .value = value };
+                entries[parsed] = .{ .key = key, .value = value };
             }
             break :blk Term{ .map_u64 = entries };
         },

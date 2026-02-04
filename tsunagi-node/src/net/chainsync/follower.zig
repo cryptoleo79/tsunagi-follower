@@ -8,6 +8,7 @@ const bt_boundary = @import("../transport/byte_transport.zig");
 const tcp_bt = @import("../transport/tcp_byte_transport.zig");
 const header_raw = @import("../ledger/header_raw.zig");
 const cursor_store = @import("../ledger/cursor.zig");
+const tps = @import("../metrics/tps.zig");
 
 const chainsync_proto: u16 = 2;
 const keepalive_proto: u16 = 8;
@@ -29,6 +30,7 @@ pub const Callbacks = struct {
         tip_block: u64,
         tip_hash32: [32]u8,
         header_hash32: [32]u8,
+        tx_count: u64,
     ) anyerror!void,
     on_roll_backward: fn (
         ctx: *anyopaque,
@@ -269,6 +271,23 @@ fn computeHeaderHash32(alloc: std.mem.Allocator, header_cbor_bytes: []const u8) 
     return digest;
 }
 
+fn computeTxCount(alloc: std.mem.Allocator, inner_bytes: []const u8) u64 {
+    var fbs = std.io.fixedBufferStream(inner_bytes);
+    const top = cbor.decode(alloc, fbs.reader()) catch return 0;
+    defer cbor.free(top, alloc);
+
+    if (top != .array) return 0;
+    const items = top.array;
+    if (items.len < 2 or items[1] != .bytes) return 0;
+
+    var body_fbs = std.io.fixedBufferStream(items[1].bytes);
+    const body = cbor.decode(alloc, body_fbs.reader()) catch return 0;
+    defer cbor.free(body, alloc);
+
+    if (body != .array) return 0;
+    return @as(u64, @intCast(body.array.len));
+}
+
 fn cloneTerm(alloc: std.mem.Allocator, term: cbor.Term) !cbor.Term {
     return switch (term) {
         .u64 => |v| cbor.Term{ .u64 = v },
@@ -340,6 +359,8 @@ pub fn run(
 
     var should_stop = false;
     try installSignalHandlers(&should_stop);
+
+    var tps_meter = tps.TpsMeter.init(std.time.timestamp());
 
     var last_tip: ?cbor.Term = null;
     defer if (last_tip) |tip| {
@@ -508,7 +529,7 @@ pub fn run(
                                             tip_hash32_value = hash;
                                         }
 
-                                        const header_hash32_value = blk: {
+                                        const inner_bytes = blk: {
                                             const block = next_msg.roll_forward.block;
                                             if (block != .array) return HeaderHashError.InvalidBlock;
                                             const items = block.array;
@@ -525,10 +546,11 @@ pub fn run(
                                                 return HeaderHashError.InvalidBlock;
                                             };
 
-                                            const inner_bytes = header_raw.getTag24InnerBytes(block_bytes) orelse block_bytes;
-                                            break :blk computeHeaderHash32(alloc, inner_bytes) orelse
-                                                return HeaderHashError.InvalidHeader;
+                                            break :blk header_raw.getTag24InnerBytes(block_bytes) orelse block_bytes;
                                         };
+                                        const header_hash32_value = computeHeaderHash32(alloc, inner_bytes) orelse
+                                            return HeaderHashError.InvalidHeader;
+                                        const tx_count = computeTxCount(alloc, inner_bytes);
 
                                         if (DEBUG_VERBOSE) {
                                             var header_prefix: [8]u8 = [_]u8{'?'} ** 8;
@@ -543,6 +565,8 @@ pub fn run(
                                             );
                                         }
 
+                                        const now = std.time.timestamp();
+                                        tps_meter.addBlock(tx_count, now);
                                         ctx.roll_forward_count += 1;
                                         ctx.current_tip = next_msg.roll_forward.tip;
                                         ctx.current_block = next_msg.roll_forward.block;
@@ -552,6 +576,7 @@ pub fn run(
                                             tip_block,
                                             tip_hash32_value,
                                             header_hash32_value,
+                                            tx_count,
                                         );
                                         ctx.current_tip = null;
                                         ctx.current_block = null;

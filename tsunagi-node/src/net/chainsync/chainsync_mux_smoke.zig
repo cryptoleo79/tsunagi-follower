@@ -3,6 +3,7 @@ const std = @import("std");
 const cbor = @import("../cbor/term.zig");
 const follower = @import("follower.zig");
 const journal = @import("../ledger/journal.zig");
+const tps = @import("../ledger/tps.zig");
 const header_raw = @import("../ledger/header_raw.zig");
 const cursor_store = @import("../ledger/cursor.zig");
 
@@ -1045,6 +1046,7 @@ fn printTip(term: cbor.Term) void {
 const FollowerCtx = struct {
     base: follower.Context,
     alloc: std.mem.Allocator,
+    tps_meter: ?tps.TpsMeter = null,
     prev_candidates: ?[]HeaderCandidate = null,
     prev_header_values: [15]?[]u8 = [_]?[]u8{null} ** 15,
     prev_changed: [15]bool = [_]bool{false} ** 15,
@@ -1067,6 +1069,7 @@ fn onRollForward(
     tip_block: u64,
     tip_hash32: [32]u8,
     header_hash32: [32]u8,
+    tx_count: u64,
 ) !void {
     _ = tip_slot;
     _ = tip_block;
@@ -1377,6 +1380,12 @@ fn onRollForward(
         header_hash_hex[0..],
     );
     std.debug.print("JOURNAL append fwd\n", .{});
+    const now = std.time.timestamp();
+    if (ctx.tps_meter == null) {
+        ctx.tps_meter = tps.TpsMeter.init(now);
+    }
+    ctx.tps_meter.?.addBlock(tx_count, now);
+    std.debug.print("TX_COUNT={d}\n", .{tx_count});
     var tip_prefix: [8]u8 = [_]u8{'?'} ** 8;
     if (tip_prefix8) |prefix| {
         tip_prefix = prefix;
@@ -1493,6 +1502,7 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
             .debug_verbose = DEBUG_VERBOSE,
         },
         .alloc = alloc,
+        .tps_meter = null,
         .prev_candidates = null,
         .prev_header_values = [_]?[]u8{null} ** 15,
         .prev_changed = [_]bool{false} ** 15,
