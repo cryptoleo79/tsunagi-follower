@@ -78,6 +78,31 @@ fn captureFirstRollForward(
     }
 }
 
+fn writeCaptureFile(tip: cbor.Term, header_cbor_bytes: []const u8) !void {
+    var file = try std.fs.createFileAbsolute("/tmp/tsunagi_capture.txt", .{ .truncate = true });
+    defer file.close();
+
+    const tip_hash = getTipHash(tip);
+    if (tip_hash) |hash| {
+        if (hash.len == 32) {
+            try file.writer().print(
+                "tip_hash_full={s}\n",
+                .{std.fmt.fmtSliceHexLower(hash)},
+            );
+        } else {
+            try file.writer().print("tip_hash_full=(invalid)\n", .{});
+        }
+    } else {
+        try file.writer().print("tip_hash_full=(null)\n", .{});
+    }
+
+    try file.writer().print(
+        "header_cbor_hex={s}\n",
+        .{std.fmt.fmtSliceHexLower(header_cbor_bytes)},
+    );
+    try file.writer().print("header_cbor_len={d}\n", .{header_cbor_bytes.len});
+}
+
 fn collectHeaderCandidates(alloc: std.mem.Allocator, block: cbor.Term) ![]HeaderCandidate {
     var list = std.ArrayList(HeaderCandidate).init(alloc);
     errdefer {
@@ -1108,6 +1133,7 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
     var prev_changed: [15]bool = [_]bool{false} ** 15;
     var captured_first_rollforward = false;
     var prev_header_hash_opt: ?[32]u8 = null;
+    var prev_header_cbor_len: ?usize = null;
     var prev_header_body_raw: ?header_raw.HeaderBodyRawSnapshot = null;
 
     const timeout_ms: u32 = 10_000;
@@ -1236,6 +1262,11 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
                                                     header_info.cbor_bytes,
                                                     header_info.prev_hash,
                                                 );
+                                                try writeCaptureFile(
+                                                    next_msg.roll_forward.tip,
+                                                    header_info.cbor_bytes,
+                                                );
+                                                return;
                                             }
                                             if (prev_header_hash_opt) |prev_hash| {
                                                 if (header_info.prev_hash) |next_prev_hash| {
@@ -1255,10 +1286,97 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
                                                     header_raw.printHeaderBodyRawStability(prev_body, curr_body, true);
                                                 }
                                                 prev_header_body_raw = curr_body;
+                                                if (prev_header_hash_opt) |prev_hash| {
+                                                    var match_any = false;
+                                                    const matches_f3 = std.mem.eql(
+                                                        u8,
+                                                        prev_hash[0..],
+                                                        curr_body.f3_bytes32[0..],
+                                                    );
+                                                    std.debug.print(
+                                                        "prev_header_hash == curr.f3_bytes32 -> {s}\n",
+                                                        .{if (matches_f3) "true" else "false"},
+                                                    );
+                                                    if (matches_f3) {
+                                                        std.debug.print("MATCH FIELD: f3\n", .{});
+                                                        match_any = true;
+                                                    }
+
+                                                    const matches_f4 = std.mem.eql(
+                                                        u8,
+                                                        prev_hash[0..],
+                                                        curr_body.f4_bytes32[0..],
+                                                    );
+                                                    std.debug.print(
+                                                        "prev_header_hash == curr.f4_bytes32 -> {s}\n",
+                                                        .{if (matches_f4) "true" else "false"},
+                                                    );
+                                                    if (matches_f4) {
+                                                        std.debug.print("MATCH FIELD: f4\n", .{});
+                                                        match_any = true;
+                                                    }
+
+                                                    const matches_f8 = std.mem.eql(
+                                                        u8,
+                                                        prev_hash[0..],
+                                                        curr_body.f8_bytes32[0..],
+                                                    );
+                                                    std.debug.print(
+                                                        "prev_header_hash == curr.f8_bytes32 -> {s}\n",
+                                                        .{if (matches_f8) "true" else "false"},
+                                                    );
+                                                    if (matches_f8) {
+                                                        std.debug.print("MATCH FIELD: f8\n", .{});
+                                                        match_any = true;
+                                                    }
+
+                                                    const matches_f9 = std.mem.eql(
+                                                        u8,
+                                                        prev_hash[0..],
+                                                        curr_body.f9_bytes32[0..],
+                                                    );
+                                                    std.debug.print(
+                                                        "prev_header_hash == curr.f9_bytes32 -> {s}\n",
+                                                        .{if (matches_f9) "true" else "false"},
+                                                    );
+                                                    if (matches_f9) {
+                                                        std.debug.print("MATCH FIELD: f9\n", .{});
+                                                        match_any = true;
+                                                    }
+
+                                                    if (curr_body.f2 == .bytes32) {
+                                                        const matches_f2 = std.mem.eql(
+                                                            u8,
+                                                            prev_hash[0..],
+                                                            curr_body.f2.bytes32[0..],
+                                                        );
+                                                        std.debug.print(
+                                                            "prev_header_hash == curr.f2 -> {s}\n",
+                                                            .{if (matches_f2) "true" else "false"},
+                                                        );
+                                                        if (matches_f2) {
+                                                            std.debug.print("MATCH FIELD: f2\n", .{});
+                                                            match_any = true;
+                                                        }
+                                                    }
+
+                                                    if (match_any) {
+                                                        std.debug.print(
+                                                            "CHAIN OK: curr_prev_hash matches prev_header_hash\n",
+                                                            .{},
+                                                        );
+                                                    } else {
+                                                        std.debug.print(
+                                                            "CHAIN FAIL: curr_prev_hash != prev_header_hash\n",
+                                                            .{},
+                                                        );
+                                                    }
+                                                }
                                             } else if (prev_header_body_raw != null) {
                                                 std.debug.print("consensus continuity: BROKEN\n", .{});
                                             }
                                             prev_header_hash_opt = header_hash;
+                                            prev_header_cbor_len = header_info.cbor_bytes.len;
                                         }
                                         const curr_candidates = try collectHeaderCandidates(
                                             alloc,
