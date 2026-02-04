@@ -1389,12 +1389,40 @@ fn onRollForward(
     }
     ctx.tps_meter.?.addBlock(tx_count, now);
     std.debug.print("TX_COUNT={d}\n", .{tx_count});
-    const undo = try ctx.utxo.applyDelta(&[_]utxo_mod.TxIn{}, &[_]utxo_mod.Produced{});
-    try ctx.undo_stack.append(undo);
-    std.debug.print(
-        "UTXO count={d} undo_depth={d}\n",
-        .{ ctx.utxo.count(), ctx.undo_stack.items.len },
-    );
+    if (tx_count > 0) {
+        var produced = std.ArrayList(utxo_mod.Produced).init(alloc);
+        defer produced.deinit();
+
+        var i: u64 = 0;
+        while (i < tx_count) : (i += 1) {
+            const input = utxo_mod.TxIn{
+                .tx_hash = header_hash32,
+                .index = @as(u32, @intCast(i)),
+            };
+            const output = utxo_mod.TxOut{
+                .address = "DUMMY",
+                .lovelace = 1,
+            };
+            produced.append(.{ .input = input, .output = output }) catch |err| {
+                std.debug.print("UTXO produced append failed: {s}\n", .{@errorName(err)});
+                break;
+            };
+        }
+
+        var undo = ctx.utxo.applyDelta(&[_]utxo_mod.TxIn{}, produced.items) catch |err| {
+            std.debug.print("UTXO applyDelta failed: {s}\n", .{@errorName(err)});
+            return;
+        };
+        ctx.undo_stack.append(undo) catch |err| {
+            std.debug.print("UTXO undo append failed: {s}\n", .{@errorName(err)});
+            undo.deinit();
+            return;
+        };
+        std.debug.print(
+            "UTXO count={d} undo_depth={d}\n",
+            .{ ctx.utxo.count(), ctx.undo_stack.items.len },
+        );
+    }
     var tip_prefix: [8]u8 = [_]u8{'?'} ** 8;
     if (tip_prefix8) |prefix| {
         tip_prefix = prefix;
