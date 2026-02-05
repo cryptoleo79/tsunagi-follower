@@ -6,26 +6,41 @@ const journal = @import("../ledger/journal.zig");
 const tps = @import("../ledger/tps.zig");
 const utxo_mod = @import("../ledger/utxo.zig");
 const utxo_store = @import("../ledger/utxo_store.zig");
+const tx_decode = @import("../ledger/tx_decode.zig");
 const i18n = @import("../../cli/i18n.zig");
 const pretty = @import("../../cli/pretty.zig");
 const header_raw = @import("../ledger/header_raw.zig");
 const cursor_store = @import("../ledger/cursor.zig");
 
-const cursor_dir = "/home/midnight/.tsunagi";
-const cursor_path = "/home/midnight/.tsunagi/cursor.json";
-const journal_path = "/home/midnight/.tsunagi/journal.ndjson";
-const utxo_path = "/home/midnight/.tsunagi/utxo.snapshot";
 var g_debug: bool = false;
 
 fn vprint(comptime fmt: []const u8, args: anytype) void {
     if (g_debug) std.debug.print(fmt, args);
 }
 
-fn ensureCursorDir() !void {
-    std.fs.makeDirAbsolute(cursor_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
+fn resolveStateDir(alloc: std.mem.Allocator) ![]u8 {
+    const env_dir = std.process.getEnvVarOwned(alloc, "TSUNAGI_HOME") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => null,
         else => return err,
     };
+    if (env_dir) |dir| {
+        if (dir.len > 0) return dir;
+        alloc.free(dir);
+    }
+
+    const home = std.process.getEnvVarOwned(alloc, "HOME") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => null,
+        else => return err,
+    };
+    if (home) |dir| {
+        defer alloc.free(dir);
+        return try std.fs.path.join(alloc, &[_][]const u8{ dir, ".tsunagi" });
+    }
+    return error.EnvironmentVariableNotFound;
+}
+
+fn ensureStateDir(dir_path: []const u8) !void {
+    try std.fs.cwd().makePath(dir_path);
 }
 
 const HeaderCandidate = struct {
@@ -1057,6 +1072,10 @@ const FollowerCtx = struct {
     debug: bool,
     lang: i18n.Lang,
     pretty: bool,
+    preview_utxo: bool,
+    cursor_path: []const u8,
+    journal_path: []const u8,
+    utxo_path: []const u8,
     last_status_unix: i64 = 0,
     stopping: bool = false,
     prev_candidates: ?[]HeaderCandidate = null,
@@ -1127,10 +1146,18 @@ fn onRollForward(
         tip_prefix8 = prefix;
     }
     if (new_slot != null and new_block_no != null and has_tip_hash) {
-        if (new_slot.? == ctx.base.cursor.slot and
-            new_block_no.? == ctx.base.cursor.block_no and
-            std.mem.eql(u8, new_tip_hash_hex[0..], ctx.base.cursor.tip_hash_hex[0..]))
-        {
+        const slot = new_slot.?;
+        const block_no = new_block_no.?;
+        if (slot < ctx.base.cursor.slot or block_no < ctx.base.cursor.block_no) {
+            if (ctx.debug) {
+                std.debug.print(
+                    "ROLL FWD (stale) slot={d} block={d} (no save)\n",
+                    .{ slot, block_no },
+                );
+            }
+            return;
+        }
+        if (std.mem.eql(u8, new_tip_hash_hex[0..], ctx.base.cursor.tip_hash_hex[0..])) {
             if (tip_prefix8) |prefix| {
                 const should_log = if (ctx.last_dup_tip_hex) |last_dup|
                     !std.mem.eql(u8, last_dup[0..], prefix[0..])
@@ -1139,7 +1166,7 @@ fn onRollForward(
                 if (should_log and ctx.debug) {
                     std.debug.print(
                         "ROLL FWD (duplicate) slot={d} block={d} tip={s} (no save)\n",
-                        .{ new_slot.?, new_block_no.?, prefix[0..] },
+                        .{ slot, block_no, prefix[0..] },
                     );
                     ctx.last_dup_tip_hex = prefix;
                 }
@@ -1384,12 +1411,12 @@ fn onRollForward(
     }
     ctx.base.cursor.roll_forward_count += 1;
     ctx.base.cursor.updated_unix = std.time.timestamp();
-    try cursor_store.save(ctx.base.cursor, cursor_path);
+    try cursor_store.save(ctx.base.cursor, ctx.cursor_path);
     if (!ctx.stopping) {
-        std.debug.print("CURSOR saved {s}\n", .{cursor_path});
+        std.debug.print("CURSOR saved {s}\n", .{ctx.cursor_path});
     }
     try journal.appendRollForward(
-        journal_path,
+        ctx.journal_path,
         std.time.timestamp(),
         ctx.base.cursor.slot,
         ctx.base.cursor.block_no,
@@ -1409,42 +1436,14 @@ fn onRollForward(
     if (ctx.debug and !ctx.stopping) {
         std.debug.print("TX_COUNT={d}\n", .{tx_count});
     }
-    if (tx_count > 0) {
-        var produced = std.ArrayList(utxo_mod.Produced).init(alloc);
-        defer produced.deinit();
-
-        var i: u64 = 0;
-        while (i < tx_count) : (i += 1) {
-            const input = utxo_mod.TxIn{
-                .tx_hash = header_hash32,
-                .index = @as(u32, @intCast(i)),
-            };
-            const output = utxo_mod.TxOut{
-                .address = "DUMMY",
-                .lovelace = 1,
-            };
-            produced.append(.{ .input = input, .output = output }) catch |err| {
-                std.debug.print("UTXO produced append failed: {s}\n", .{@errorName(err)});
-                break;
-            };
-        }
-
-        var undo = ctx.utxo.applyDelta(&[_]utxo_mod.TxIn{}, produced.items) catch |err| {
-            std.debug.print("UTXO applyDelta failed: {s}\n", .{@errorName(err)});
-            return;
-        };
-        ctx.undo_stack.append(undo) catch |err| {
-            std.debug.print("UTXO undo append failed: {s}\n", .{@errorName(err)});
-            undo.deinit();
-            return;
-        };
+    if (ctx.preview_utxo) {
         if (ctx.debug and !ctx.stopping) {
             std.debug.print(
                 "UTXO count={d} undo_depth={d}\n",
                 .{ ctx.utxo.count(), ctx.undo_stack.items.len },
             );
         }
-        utxo_store.save(utxo_path, &ctx.utxo) catch {};
+        utxo_store.save(ctx.utxo_path, &ctx.utxo) catch {};
     }
     var tip_prefix: [8]u8 = [_]u8{'?'} ** 8;
     if (tip_prefix8) |prefix| {
@@ -1454,13 +1453,15 @@ fn onRollForward(
     ctx.last_dup_tip_hex = null;
     if (!ctx.stopping) {
         std.debug.print(
-            "ROLL FWD slot={d} block={d} tip={s} fwd={d} back={d}\n",
+            "ROLL FWD slot={d} block={d} tip={s} fwd={d} back={d} txs={d} utxo={d}\n",
             .{
                 ctx.base.cursor.slot,
                 ctx.base.cursor.block_no,
                 tip_prefix[0..],
                 ctx.base.cursor.roll_forward_count,
                 ctx.base.cursor.roll_backward_count,
+                tx_count,
+                ctx.utxo.count(),
             },
         );
     }
@@ -1488,12 +1489,12 @@ fn onRollBackward(
     }
     ctx.base.cursor.roll_backward_count += 1;
     ctx.base.cursor.updated_unix = std.time.timestamp();
-    try cursor_store.save(ctx.base.cursor, cursor_path);
+    try cursor_store.save(ctx.base.cursor, ctx.cursor_path);
     if (!ctx.stopping) {
-        std.debug.print("CURSOR saved {s}\n", .{cursor_path});
+        std.debug.print("CURSOR saved {s}\n", .{ctx.cursor_path});
     }
     try journal.appendRollBackward(
-        journal_path,
+        ctx.journal_path,
         std.time.timestamp(),
         ctx.base.cursor.slot,
         ctx.base.cursor.block_no,
@@ -1596,8 +1597,22 @@ pub fn runWithOptions(
     lang: i18n.Lang,
     debug: bool,
     pretty_status: bool,
+    is_mainnet: bool,
 ) !void {
     g_debug = debug;
+    const network_magic: u64 = if (is_mainnet) 764_824_073 else 2;
+    const peer_sharing = !is_mainnet;
+    const state_dir = try resolveStateDir(alloc);
+    errdefer alloc.free(state_dir);
+    try ensureStateDir(state_dir);
+
+    const cursor_path = try std.fs.path.join(alloc, &[_][]const u8{ state_dir, "cursor.json" });
+    errdefer alloc.free(cursor_path);
+    const journal_path = try std.fs.path.join(alloc, &[_][]const u8{ state_dir, "journal.ndjson" });
+    errdefer alloc.free(journal_path);
+    const utxo_path = try std.fs.path.join(alloc, &[_][]const u8{ state_dir, "utxo.snapshot" });
+    errdefer alloc.free(utxo_path);
+
     var ctx = FollowerCtx{
         .base = .{
             .cursor = try cursor_store.loadOrInit(alloc, cursor_path),
@@ -1606,6 +1621,11 @@ pub fn runWithOptions(
             .current_point = null,
             .roll_forward_count = 0,
             .debug_verbose = debug,
+            .utxo = null,
+            .undo_stack = null,
+            .preview_utxo = false,
+            .network_magic = network_magic,
+            .peer_sharing = peer_sharing,
         },
         .alloc = alloc,
         .tps_meter = null,
@@ -1614,6 +1634,10 @@ pub fn runWithOptions(
         .debug = debug,
         .lang = lang,
         .pretty = pretty_status,
+        .preview_utxo = port == 30002 or std.mem.indexOf(u8, host, "preview") != null,
+        .cursor_path = cursor_path,
+        .journal_path = journal_path,
+        .utxo_path = utxo_path,
         .prev_candidates = null,
         .prev_header_values = [_]?[]u8{null} ** 15,
         .prev_changed = [_]bool{false} ** 15,
@@ -1625,6 +1649,9 @@ pub fn runWithOptions(
         .last_dup_tip_hex = null,
         .last_saved_tip_hex = null,
     };
+    ctx.base.utxo = &ctx.utxo;
+    ctx.base.undo_stack = &ctx.undo_stack;
+    ctx.base.preview_utxo = ctx.preview_utxo;
     defer {
         if (ctx.prev_candidates) |candidates| freeHeaderCandidates(alloc, candidates);
         freeHeaderValues(alloc, &ctx.prev_header_values);
@@ -1632,31 +1659,28 @@ pub fn runWithOptions(
             undo.deinit();
         }
         ctx.undo_stack.deinit();
-        utxo_store.save(utxo_path, &ctx.utxo) catch {};
+        utxo_store.save(ctx.utxo_path, &ctx.utxo) catch {};
         ctx.utxo.deinit();
+        alloc.free(ctx.cursor_path);
+        alloc.free(ctx.journal_path);
+        alloc.free(ctx.utxo_path);
+        alloc.free(state_dir);
     }
 
-    try ensureCursorDir();
-    {
-        var home = try std.fs.openDirAbsolute("/home/midnight", .{});
-        defer home.close();
-        try home.makePath(".tsunagi");
-    }
-
-    const utxo_file = std.fs.openFileAbsolute(utxo_path, .{}) catch null;
+    const utxo_file = std.fs.openFileAbsolute(ctx.utxo_path, .{}) catch null;
     if (utxo_file) |file| {
         file.close();
         ctx.utxo.deinit();
-        ctx.utxo = try utxo_store.load(alloc, utxo_path);
+        ctx.utxo = try utxo_store.load(alloc, ctx.utxo_path);
         std.debug.print(
             "{s} (count={d})\n",
             .{ i18n.msg(lang, "snapshot_loaded"), ctx.utxo.count() },
         );
     }
-    try utxo_store.save(utxo_path, &ctx.utxo);
+    try utxo_store.save(ctx.utxo_path, &ctx.utxo);
     std.debug.print(
         "{s}: {s} (count={d})\n",
-        .{ i18n.msg(lang, "snapshot_ready"), utxo_path, ctx.utxo.count() },
+        .{ i18n.msg(lang, "snapshot_ready"), ctx.utxo_path, ctx.utxo.count() },
     );
 
     vprint(
@@ -1680,5 +1704,5 @@ pub fn runWithOptions(
 }
 
 pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
-    try runWithOptions(alloc, host, port, .en, true, false);
+    try runWithOptions(alloc, host, port, .en, true, false, port == 3001);
 }

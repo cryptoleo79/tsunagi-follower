@@ -48,6 +48,18 @@ fn printTermPretty(term: cbor.Term, indent: usize) void {
     }
 }
 
+fn buildV14VersionData(alloc: std.mem.Allocator, is_mainnet: bool) !cbor.Term {
+    const network_magic: u64 = if (is_mainnet) 764_824_073 else 2;
+    const peer_sharing: u64 = if (is_mainnet) 0 else 1;
+
+    var version_items = try alloc.alloc(cbor.Term, 4);
+    version_items[0] = .{ .u64 = network_magic };
+    version_items[1] = .{ .bool = false };
+    version_items[2] = .{ .u64 = peer_sharing };
+    version_items[3] = .{ .bool = false };
+    return cbor.Term{ .array = version_items };
+}
+
 pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
     var bt = try tcp_bt.connect(alloc, host, port);
     defer bt.deinit();
@@ -55,12 +67,8 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
     const timeout_ms: u32 = 1000;
     tcp_bt.setReadTimeout(&bt, timeout_ms) catch {};
 
-    var version_items = try alloc.alloc(cbor.Term, 4);
-    version_items[0] = .{ .u64 = 2 };
-    version_items[1] = .{ .bool = false };
-    version_items[2] = .{ .u64 = 1 };
-    version_items[3] = .{ .bool = false };
-    const version_data = cbor.Term{ .array = version_items };
+    const is_mainnet = port == 3001 or std.mem.indexOf(u8, host, "mainnet") != null;
+    const version_data = try buildV14VersionData(alloc, is_mainnet);
 
     var entries = try alloc.alloc(cbor.MapEntry, 1);
     entries[0] = .{ .key = 14, .value = version_data };

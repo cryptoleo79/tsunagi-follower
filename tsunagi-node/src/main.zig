@@ -5,6 +5,7 @@ const Mux = @import("net/mux.zig").Mux;
 const Message = @import("net/protocol/message.zig").Message;
 const ChainSync = @import("net/miniproto/chainsync.zig").ChainSync;
 const BlockFetch = @import("net/miniproto/blockfetch.zig").BlockFetch;
+const follower = @import("net/chainsync/follower.zig");
 
 const memory_bt = @import("net/transport/memory_byte_transport.zig");
 const tcp_smoke = @import("net/transport/tcp_smoke.zig");
@@ -28,7 +29,7 @@ fn usage() void {
         \\
         \\Usage:
         \\  zig build run
-        \\  zig build run -- run [--net preview|mainnet] [--lang en|ja] [--debug]
+        \\  zig build run -- run [--net preview|mainnet] [--peer host:port] [--lang en|ja] [--debug]
         \\  zig build run -- doctor [--lang en|ja]
         \\  zig build run -- tcp-smoke <host> <port>
         \\  zig build run -- tcp-framed <host> <port>
@@ -45,6 +46,27 @@ fn fileExists(path: []const u8) bool {
     const f = std.fs.openFileAbsolute(path, .{}) catch return false;
     f.close();
     return true;
+}
+
+fn getStateDir(alloc: std.mem.Allocator) ![]u8 {
+    const env_dir = std.process.getEnvVarOwned(alloc, "TSUNAGI_HOME") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => null,
+        else => return err,
+    };
+    if (env_dir) |dir| {
+        if (dir.len > 0) return dir;
+        alloc.free(dir);
+    }
+
+    const home = std.process.getEnvVarOwned(alloc, "HOME") catch |err| switch (err) {
+        error.EnvironmentVariableNotFound => null,
+        else => return err,
+    };
+    if (home) |dir| {
+        defer alloc.free(dir);
+        return try std.fs.path.join(alloc, &[_][]const u8{ dir, ".tsunagi" });
+    }
+    return error.EnvironmentVariableNotFound;
 }
 
 fn parseFlagValue(arg: []const u8, name: []const u8) ?[]const u8 {
@@ -72,10 +94,22 @@ pub fn main() !void {
             var lang: i18n.Lang = .en;
             var debug = false;
             var net: []const u8 = "preview";
+            var peer_override: ?[]const u8 = null;
 
             while (args_it.next()) |arg| {
                 if (std.mem.eql(u8, arg, "--debug")) {
                     debug = true;
+                    continue;
+                }
+                if (std.mem.eql(u8, arg, "--peer")) {
+                    peer_override = args_it.next() orelse {
+                        std.debug.print("missing value for --peer\n", .{});
+                        return error.InvalidArgs;
+                    };
+                    continue;
+                }
+                if (parseFlagValue(arg, "--peer")) |val| {
+                    peer_override = val;
                     continue;
                 }
                 if (std.mem.eql(u8, arg, "--lang")) {
@@ -101,21 +135,68 @@ pub fn main() !void {
                 return error.InvalidArgs;
             }
 
-            const host: []const u8 = if (std.mem.eql(u8, net, "preview"))
-                "preview-node.world.dev.cardano.org"
-            else if (std.mem.eql(u8, net, "mainnet"))
-                "node.world.dev.cardano.org"
-            else {
-                std.debug.print("unknown net: {s}\n", .{net});
-                return error.InvalidArgs;
-            };
-            const port: u16 = 30002;
+            var host: []const u8 = undefined;
+            var port: u16 = undefined;
+            var used_peer_override = false;
+            var host_owned = false;
+
+            if (peer_override) |peer| {
+                const colon = std.mem.indexOfScalar(u8, peer, ':') orelse {
+                    std.debug.print("invalid --peer value (expected host:port)\n", .{});
+                    return error.InvalidArgs;
+                };
+                host = peer[0..colon];
+                const port_str = peer[colon + 1 ..];
+                port = std.fmt.parseUnsigned(u16, port_str, 10) catch {
+                    std.debug.print("invalid --peer port\n", .{});
+                    return error.InvalidArgs;
+                };
+                used_peer_override = true;
+            } else {
+                if (std.mem.eql(u8, net, "mainnet")) {
+                    const timeout_ms: u32 = 3_000;
+                    const peer = try follower.selectMainnetPeer(alloc, timeout_ms) orelse {
+                        std.debug.print(
+                            "mainnet peer selection failed; pass --peer host:port\n",
+                            .{},
+                        );
+                        return error.InvalidArgs;
+                    };
+                    host = peer.host;
+                    port = peer.port;
+                    host_owned = true;
+                } else if (std.mem.eql(u8, net, "preview")) {
+                    host = "preview-node.world.dev.cardano.org";
+                    port = 30002;
+                } else if (std.mem.eql(u8, net, "preprod")) {
+                    host = "preprod-node.world.dev.cardano.org";
+                    port = 30000;
+                } else {
+                    std.debug.print("unknown net: {s}\n", .{net});
+                    return error.InvalidArgs;
+                }
+            }
 
             pretty.printHeader(lang);
+            defer if (host_owned) alloc.free(host);
+            if (used_peer_override) {
+                if (lang == .ja) {
+                    std.debug.print("接続先指定: {s}:{d}\n", .{ host, port });
+                } else {
+                    std.debug.print("Peer override: {s}:{d}\n", .{ host, port });
+                }
+            } else {
+                if (lang == .ja) {
+                    std.debug.print("ネットワーク: {s} 接続先={s}:{d}\n", .{ net, host, port });
+                } else {
+                    std.debug.print("Network: {s} peer={s}:{d}\n", .{ net, host, port });
+                }
+            }
             std.debug.print("{s}\n", .{i18n.msg(lang, "running")});
             std.debug.print("{s}\n", .{i18n.msg(lang, "ctrlc_hint")});
 
-            try chainsync_mux_smoke.runWithOptions(alloc, host, port, lang, debug, true);
+            const is_mainnet = std.mem.eql(u8, net, "mainnet");
+            try chainsync_mux_smoke.runWithOptions(alloc, host, port, lang, debug, true, is_mainnet);
             return;
         } else if (std.mem.eql(u8, cmd, "doctor")) {
             var lang: i18n.Lang = .en;
@@ -135,10 +216,17 @@ pub fn main() !void {
             const ok = i18n.msg(lang, "doctor_ok");
             const fail = i18n.msg(lang, "doctor_fail");
 
-            const cursor_path = "/home/midnight/.tsunagi/cursor.json";
-            const journal_path = "/home/midnight/.tsunagi/journal.ndjson";
-            const utxo_path = "/home/midnight/.tsunagi/utxo.snapshot";
+            const state_dir = try getStateDir(alloc);
+            defer alloc.free(state_dir);
+            std.fs.cwd().makePath(state_dir) catch {};
+            const cursor_path = try std.fs.path.join(alloc, &[_][]const u8{ state_dir, "cursor.json" });
+            defer alloc.free(cursor_path);
+            const journal_path = try std.fs.path.join(alloc, &[_][]const u8{ state_dir, "journal.ndjson" });
+            defer alloc.free(journal_path);
+            const utxo_path = try std.fs.path.join(alloc, &[_][]const u8{ state_dir, "utxo.snapshot" });
+            defer alloc.free(utxo_path);
 
+            std.debug.print("state_dir: {s}\n", .{state_dir});
             const cursor_exists = fileExists(cursor_path);
             const journal_exists = fileExists(journal_path);
             const utxo_exists = fileExists(utxo_path);

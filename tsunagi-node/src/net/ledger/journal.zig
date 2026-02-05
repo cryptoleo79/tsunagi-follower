@@ -1,15 +1,12 @@
 const std = @import("std");
 
-const journal_dir = "/home/midnight/.tsunagi";
+fn openAppend(path: []const u8) !std.fs.File {
+    const dir = std.fs.path.dirname(path) orelse return error.InvalidPath;
+    try std.fs.cwd().makePath(dir);
 
-fn openAppend() !std.fs.File {
-    var home = try std.fs.openDirAbsolute("/home/midnight", .{});
-    defer home.close();
-    try home.makePath(".tsunagi");
-
-    var file = home.openFile(".tsunagi/journal.ndjson", .{ .mode = .read_write }) catch |err| switch (err) {
-        error.FileNotFound => try home.createFile(
-            ".tsunagi/journal.ndjson",
+    var file = std.fs.openFileAbsolute(path, .{ .mode = .read_write }) catch |err| switch (err) {
+        error.FileNotFound => try std.fs.createFileAbsolute(
+            path,
             .{ .read = true, .truncate = false },
         ),
         else => return err,
@@ -28,8 +25,7 @@ pub fn appendRollForward(
     tx_count: u64,
     utxo_count: u64,
 ) !void {
-    _ = path;
-    var file = try openAppend();
+    var file = try openAppend(path);
     defer file.close();
 
     const writer = file.writer();
@@ -46,8 +42,7 @@ pub fn appendRollBackward(
     block_no: u64,
     tip_hash_hex: []const u8,
 ) !void {
-    _ = path;
-    var file = try openAppend();
+    var file = try openAppend(path);
     defer file.close();
 
     const writer = file.writer();
