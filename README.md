@@ -1,186 +1,57 @@
-# TSUNAGI (Tsunagi Follower)
+# Tsunagi Node (Zig)  
+**Cardano ChainSync Follower / 軽量フォロワー**
 
-![GitHub release (latest SemVer)](https://img.shields.io/github/v/release/cryptoleo79/tsunagi-follower)
+---
 
-TSUNAGIはSPOファーストの橋渡しプロジェクトです。日本語ファースト、丁寧な“おもてなし”を大切にし、Layer‑0で人とネットワークをつなぎます。
-このリポジトリは現在「TSUNAGI Follower」を提供しており、「TSUNAGI Node」は同じリポジトリのロードマップ項目です。
+## Overview
 
-A tiny, diagnostic node-to-node ChainSync follower for the Cardano preview network.
-It is meant for learning and debugging protocol flows, not for running a full node.
-If you're new, this repo aims to keep things simple and readable.
+**EN**  
+Tsunagi is a Zig-first Cardano networking project focused on **Node-to-Node (N2N) communication and ChainSync**.  
+It connects to Cardano Preview and Mainnet peers, performs a v14 handshake over MUX, and follows the chain with rollback-aware persistent state.
 
-Cardanoのpreviewネットワーク向けに作られた、最小構成の診断用node-to-node ChainSyncフォロワーです。
-プロトコルの流れを学んだりデバッグしたりするためのもので、フルノードではありません。
-初心者の方にも読みやすい構成を目指しています。
+**JA（日本語）**  
+Tsunagi は Zig で実装された Cardano の **軽量 ChainSync フォロワー**です。  
+Node-to-Node v14 ハンドシェイク（MUX）を行い、ロールバック対応でチェーンを追跡します。
 
-## TSUNAGI Project
+---
 
-短いプロジェクト紹介と方針は以下にまとめています:
-- `docs/TSUNAGI_MANIFESTO.md`
-- `docs/TSUNAGI_FOR_SPO.md`
-- `docs/TSUNAGI_NODE_M0.md`
-- `docs/TSUNAGI_NODE_ARCHITECTURE.md`
-- `ROADMAP.md`
-  - `tsunagi-node/` は将来のTSUNAGI NodeのためのZig-onlyスキャフォールドです。
+## Current Features (v0.5.x)
 
-A minimal Cardano **node-to-node ChainSync** client that:
-- performs the node-to-node handshake (v14),
-- sends `MsgFindIntersect`,
-- then continuously follows the chain via `MsgRequestNext`,
-- with strict framing/validation and safe shutdown.
+- ✅ Node-to-Node **v14 handshake (MUX)**
+- ✅ ChainSync (FindIntersect / RequestNext)
+- ✅ RollForward / RollBackward 対応
+- ✅ 永続状態（Persistent State）
+  - `cursor.json`
+  - `journal.ndjson`
+  - `utxo.snapshot`
+- ✅ Preview / Mainnet 分離（`TSUNAGI_HOME`）
+- ✅ Tx 検出ヒューリスティック + TPS 表示
+- ✅ 英語 / 日本語 CLI
+- ✅ `doctor` コマンドによる状態チェック
 
-This is intentionally small and diagnostic: it logs mux framing, validates ChainSync message tags, and ignores non‑ChainSync mini‑protocol frames.
+---
 
-## What it implements
+## What this is NOT (まだ未対応)
 
-- **Cardano node-to-node mini‑protocol mux** framing
-- **Handshake** mini‑protocol (0), version 14
-- **ChainSync** mini‑protocol (2)
+- ❌ フル検証ノード（台帳・コンセンサス検証）
+- ❌ ブロック生成（BP）
+- ❌ 完全な UTxO 適用（枠組みは実装済み）
 
-## How to run
+👉 現在は **Light ChainSync follower** です。  
+将来のフルノード実装に向けた基盤です。
+
+---
+
+## Requirements
+
+- Zig **0.13.x**
+- Linux / macOS
+- Outbound TCP access to Cardano relays
+
+---
+
+## Build & Test
 
 ```bash
-zig run src/main.zig -- preview-node.world.dev.cardano.org 30002
-```
-
-You can pass a host/port as arguments. Defaults are:
-- host: `preview-node.world.dev.cardano.org`
-- port: `30002`
-
-## Quickstart
-
-Build:
-```bash
-zig build
-```
-
-Run (preview network):
-```bash
-zig run src/main.zig -- preview-node.world.dev.cardano.org 30002
-```
-
-Note: this is a diagnostic ChainSync follower for learning and debugging, not a full Cardano node.
-
-Optional: add `--pulse` for a calm, human‑readable stream (slot, short hash, time delta, rollbacks).
-See `docs/pulse-demo.md` for a short demo and recording guide.
-日本語: `--pulse` を付けると、読みやすい表示（slot/短いハッシュ/経過時間/ロールバック）になります。
-デモと録画手順は `docs/pulse-demo.md` を参照してください。
-
-## Setup wizard / セットアップ
-
-English:
-- Run from the repo root (where `build.zig` is).
-- Interactive wizard:
-  ```bash
-  zig run src/main.zig -- setup
-  ```
-- Run using config:
-  ```bash
-  zig run src/main.zig -- run
-  ```
-- For English prompts:
-  ```bash
-  zig run src/main.zig -- setup --lang en
-  ```
-
-### Absolute beginner quickstart (EN)
-- Install Zig (0.13.x).
-- Run `zig run src/main.zig -- setup`.
-- Press Enter to accept defaults.
-- Run `zig run src/main.zig -- run`.
-- Stop with Ctrl+C.
-
-日本語:
-- リポジトリのルート（`build.zig` がある場所）で実行してください。
-- 対話式セットアップ:
-  ```bash
-  zig run src/main.zig -- setup
-  ```
-- 設定ファイルで実行:
-  ```bash
-  zig run src/main.zig -- run
-  ```
-- 英語でプロンプトを表示:
-  ```bash
-  zig run src/main.zig -- setup --lang en
-  ```
-
-### はじめてのクイックスタート（JP）
-- Zig(0.13.x)を入れます。
-- `zig run src/main.zig -- setup` を実行。
-- Enterでデフォルトを選びます。
-- `zig run src/main.zig -- run` を実行。
-- 終了はCtrl+C。
-
-### クイックスタート（日本語）
-
-ビルド:
-```bash
-zig build
-```
-
-実行（previewネットワーク）:
-```bash
-zig run src/main.zig -- preview-node.world.dev.cardano.org 30002
-```
-
-注意: これは学習・デバッグ用のChainSyncフォロワーであり、フルのCardanoノードではありません。
-
-## Vision / ビジョン
-
-- Lightweight and easy to read, even for beginners.
-- Clear, minimal diagnostics for ChainSync and mux behavior.
-- Graceful shutdown and community-friendly focus.
-
-- 初心者にも読みやすい軽量なコードを目指します。
-- ChainSyncとmuxの挙動を分かりやすく診断できるようにします。
-- 安全な終了処理とコミュニティ志向を大切にします。
-
-## Design Notes / 設計メモ
-
-- Calm output designed for humans.
-- No protocol flow changes (purely observational).
-- Lightweight CBOR scan to extract slot/hash.
-
-- 人間が読みやすい落ち着いた出力。
-- プロトコルの流れは変更しない（観測のみ）。
-- slot/hash抽出のための軽量CBORスキャン。
-
-## Changelog
-
-- v0.1.2: Retry FindIntersect with tip+origin on IntersectNotFound, fix ChainSync tags, and make Ctrl-C exit quickly (socket timeout).
-- v0.1.2: IntersectNotFound時にtip+originで再試行、ChainSyncタグ修正、Ctrl-Cを即時終了に（ソケットタイムアウト）。
-- v0.1.1: Handle ChainSync MsgAwaitReply (5) correctly after RequestNext; fix payload freeing in AwaitReply loop.
-- v0.1.1: RequestNext後のChainSync MsgAwaitReply (5) を正しく扱い、AwaitReplyループのペイロード解放を修正。
-- v0.1.0: Initial preview release (minimal node-to-node ChainSync follower).
-- v0.1.0: 初期previewリリース（最小構成のnode-to-node ChainSyncフォロワー）。
-
-## Key design decisions
-
-- **FindIntersect encoding**  
-  Uses a **node‑to‑node ChainSync Point**:  
-  `MsgFindIntersect = [4, [[slot, hash]]]` with `slot = 0` and a 32‑byte hash.  
-  This avoids the preview node disconnect observed when using `[null]`.
-
-- **Validation**  
-  - Validates mux **mini‑protocol id** and **responder mode** for ChainSync frames.  
-  - Decodes the **first CBOR integer tag** to enforce correct message types:
-    - `MsgIntersectFound (6)` or `MsgIntersectNotFound (7)` after FindIntersect
-    - `MsgRollForward (3)` or `MsgRollBackward (4)` after RequestNext
-  - Minimal structural check for `MsgIntersectFound` ensures a well‑formed point
-    `[slot, hash]` with a 32‑byte hash.
-
-- **Demultiplexing**  
-  A small demux helper reads mux frames until a **ChainSync responder** frame arrives.
-  Other mini‑protocol frames are logged and ignored (no state impact).
-
-- **Shutdown handling**  
-  SIGINT/SIGTERM set a stop flag. The ChainSync loop exits cleanly without sending
-  further messages, and the TCP stream is closed by normal `defer` cleanup.
-
-## Notes
-
-This is a deliberately minimal follower used for protocol validation and diagnostics.
-It does **not** decode blocks or headers and does not persist chain state.
-
-- `tsunagi-node/` — Zig-only scaffold for the future TSUNAGI Node (no functionality yet)
+cd tsunagi-node
+zig build test --summary all
