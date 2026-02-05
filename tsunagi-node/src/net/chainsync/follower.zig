@@ -922,7 +922,8 @@ pub fn run(
                                             debug_body = false;
                                         }
                                         const force_debug = force_debug_rollforwards > 0;
-                                        const effective_debug = debug_body or force_debug;
+                                        _ = force_debug;
+                                        // const effective_debug = debug_body or force_debug;
                                         var block_body_bytes_opt: ?[]const u8 = null;
                                         var body_top: ?cbor.Term = null;
                                         var body_fbs = std.io.fixedBufferStream(inner_bytes);
@@ -984,10 +985,10 @@ pub fn run(
                                             } else |_| {}
                                             defer if (body_term) |t| cbor.free(t, alloc);
 
-                                            if (tx_list) |list| {
-                                                tx_count = @intCast(list.len);
-                                                if (list.len > 0) {
-                                                    const first = list[0];
+                                            if (tx_list) |tx_list_items| {
+                                                tx_count = @intCast(tx_list_items.len);
+                                                if (tx_list_items.len > 0) {
+                                                    const first = tx_list_items[0];
                                                     tx_list_kind = if (first == .bytes)
                                                         "bytes"
                                                     else if (first == .tag and
@@ -1005,8 +1006,8 @@ pub fn run(
                                                         .{ tx_list_kind, tx_count },
                                                     );
                                                 }
-                                                if (list.len > 0) {
-                                                    deltas = tx_decode.extractTxDeltas(alloc, list, debug_body) catch deltas;
+                                                if (tx_list_items.len > 0) {
+                                                    deltas = tx_decode.extractTxDeltas(alloc, tx_list_items, debug_body) catch deltas;
                                                     if (ctx.debug_verbose and tx_count > 0 and
                                                         deltas.consumed.len == 0 and deltas.produced.len == 0)
                                                     {
