@@ -6,6 +6,8 @@ const journal = @import("../ledger/journal.zig");
 const tps = @import("../ledger/tps.zig");
 const utxo_mod = @import("../ledger/utxo.zig");
 const utxo_store = @import("../ledger/utxo_store.zig");
+const i18n = @import("../../cli/i18n.zig");
+const pretty = @import("../../cli/pretty.zig");
 const header_raw = @import("../ledger/header_raw.zig");
 const cursor_store = @import("../ledger/cursor.zig");
 
@@ -13,10 +15,10 @@ const cursor_dir = "/home/midnight/.tsunagi";
 const cursor_path = "/home/midnight/.tsunagi/cursor.json";
 const journal_path = "/home/midnight/.tsunagi/journal.ndjson";
 const utxo_path = "/home/midnight/.tsunagi/utxo.snapshot";
-const DEBUG_VERBOSE = false;
+var g_debug: bool = false;
 
 fn vprint(comptime fmt: []const u8, args: anytype) void {
-    if (DEBUG_VERBOSE) std.debug.print(fmt, args);
+    if (g_debug) std.debug.print(fmt, args);
 }
 
 fn ensureCursorDir() !void {
@@ -1052,6 +1054,9 @@ const FollowerCtx = struct {
     tps_meter: ?tps.TpsMeter = null,
     utxo: utxo_mod.UTxO,
     undo_stack: std.ArrayList(utxo_mod.Undo),
+    debug: bool,
+    lang: i18n.Lang,
+    pretty: bool,
     prev_candidates: ?[]HeaderCandidate = null,
     prev_header_values: [15]?[]u8 = [_]?[]u8{null} ** 15,
     prev_changed: [15]bool = [_]bool{false} ** 15,
@@ -1128,7 +1133,7 @@ fn onRollForward(
                     !std.mem.eql(u8, last_dup[0..], prefix[0..])
                 else
                     true;
-                if (should_log) {
+                if (should_log and ctx.debug) {
                     std.debug.print(
                         "ROLL FWD (duplicate) slot={d} block={d} tip={s} (no save)\n",
                         .{ new_slot.?, new_block_no.?, prefix[0..] },
@@ -1151,7 +1156,7 @@ fn onRollForward(
     if (has_tip_hash) {
         ctx.base.cursor.tip_hash_hex = new_tip_hash_hex;
     }
-    if (DEBUG_VERBOSE) {
+    if (ctx.debug) {
         printBlockShallow(block);
         printBlockHash(alloc, block, tip_hash);
     }
@@ -1159,7 +1164,7 @@ fn onRollForward(
         defer alloc.free(header_info.cbor_bytes);
         if (!ctx.captured_first_rollforward) {
             ctx.captured_first_rollforward = true;
-            if (DEBUG_VERBOSE) {
+            if (ctx.debug) {
                 captureFirstRollForward(
                     alloc,
                     tip,
@@ -1188,7 +1193,7 @@ fn onRollForward(
         if (curr_body_opt) |curr_body| {
             if (ctx.prev_header_body_raw) |prev_body| {
                 if (ctx.base.roll_forward_count == 2 and !ctx.printed_continuity_verdict) {
-                    if (DEBUG_VERBOSE) {
+                    if (ctx.debug) {
                         header_raw.printHeaderBodyRawStability(prev_body, curr_body, true);
                         printContinuityVerdict(prev_body, curr_body, true);
                     }
@@ -1275,7 +1280,7 @@ fn onRollForward(
                     .{if (match_any) "true" else "false"},
                 );
             }
-        } else if (ctx.prev_header_body_raw != null and DEBUG_VERBOSE) {
+        } else if (ctx.prev_header_body_raw != null and ctx.debug) {
             std.debug.print("consensus continuity: BROKEN\n", .{});
         }
         ctx.prev_header_hash_opt = header_hash32;
@@ -1328,9 +1333,9 @@ fn onRollForward(
             ctx.prev_header_values[idx] = null;
         }
     }
-    if (DEBUG_VERBOSE) printHeader32List("curr header32:", curr_candidates);
+    if (ctx.debug) printHeader32List("curr header32:", curr_candidates);
     if (ctx.prev_candidates) |prev| {
-        if (DEBUG_VERBOSE) printHeader32List("prev header32:", prev);
+        if (ctx.debug) printHeader32List("prev header32:", prev);
         for (prev) |prev_item| {
             for (curr_candidates) |curr_item| {
                 if (!ctx.prev_changed[prev_item.index] or
@@ -1364,14 +1369,16 @@ fn onRollForward(
     }
     ctx.prev_candidates = curr_candidates;
     ctx.prev_changed = curr_changed;
-    if (DEBUG_VERBOSE) printTip(tip);
-    var header_prefix: [8]u8 = [_]u8{'?'} ** 8;
-    _ = try std.fmt.bufPrint(
-        &header_prefix,
-        "{s}",
-        .{std.fmt.fmtSliceHexLower(header_hash32[0..4])},
-    );
-    std.debug.print("header_hash_prefix={s}\n", .{header_prefix[0..]});
+    if (ctx.debug) printTip(tip);
+    if (ctx.debug) {
+        var header_prefix: [8]u8 = [_]u8{'?'} ** 8;
+        _ = try std.fmt.bufPrint(
+            &header_prefix,
+            "{s}",
+            .{std.fmt.fmtSliceHexLower(header_hash32[0..4])},
+        );
+        std.debug.print("header_hash_prefix={s}\n", .{header_prefix[0..]});
+    }
     ctx.base.cursor.roll_forward_count += 1;
     ctx.base.cursor.updated_unix = std.time.timestamp();
     try cursor_store.save(ctx.base.cursor, cursor_path);
@@ -1386,13 +1393,17 @@ fn onRollForward(
         tx_count,
         ctx.utxo.count(),
     );
-    std.debug.print("JOURNAL append fwd\n", .{});
+    if (ctx.debug) {
+        std.debug.print("JOURNAL append fwd\n", .{});
+    }
     const now = std.time.timestamp();
     if (ctx.tps_meter == null) {
         ctx.tps_meter = tps.TpsMeter.init(now);
     }
     ctx.tps_meter.?.addBlock(tx_count, now);
-    std.debug.print("TX_COUNT={d}\n", .{tx_count});
+    if (ctx.debug) {
+        std.debug.print("TX_COUNT={d}\n", .{tx_count});
+    }
     if (tx_count > 0) {
         var produced = std.ArrayList(utxo_mod.Produced).init(alloc);
         defer produced.deinit();
@@ -1422,10 +1433,12 @@ fn onRollForward(
             undo.deinit();
             return;
         };
-        std.debug.print(
-            "UTXO count={d} undo_depth={d}\n",
-            .{ ctx.utxo.count(), ctx.undo_stack.items.len },
-        );
+        if (ctx.debug) {
+            std.debug.print(
+                "UTXO count={d} undo_depth={d}\n",
+                .{ ctx.utxo.count(), ctx.undo_stack.items.len },
+            );
+        }
         utxo_store.save(utxo_path, &ctx.utxo) catch {};
     }
     var tip_prefix: [8]u8 = [_]u8{'?'} ** 8;
@@ -1459,7 +1472,7 @@ fn onRollBackward(
     const ctx = ctxFromAny(ctx_any);
     const tip = ctx.base.current_tip orelse return;
 
-    if (DEBUG_VERBOSE) {
+    if (ctx.debug) {
         if (ctx.base.current_point) |point| {
             printPoint(point);
         }
@@ -1476,16 +1489,20 @@ fn onRollBackward(
         ctx.base.cursor.block_no,
         ctx.base.cursor.tip_hash_hex[0..],
     );
-    std.debug.print("JOURNAL append back\n", .{});
+    if (ctx.debug) {
+        std.debug.print("JOURNAL append back\n", .{});
+    }
     if (ctx.undo_stack.items.len > 0) {
         var undo = ctx.undo_stack.pop();
         ctx.utxo.rollbackDelta(&undo);
         undo.deinit();
     }
-    std.debug.print(
-        "UTXO rollback count={d} undo_depth={d}\n",
-        .{ ctx.utxo.count(), ctx.undo_stack.items.len },
-    );
+    if (ctx.debug) {
+        std.debug.print(
+            "UTXO rollback count={d} undo_depth={d}\n",
+            .{ ctx.utxo.count(), ctx.undo_stack.items.len },
+        );
+    }
     const tip_hash = getTipHash(tip);
     if (getTipSlotBlock(tip)) |tip_info| {
         ctx.base.cursor.slot = tip_info.slot;
@@ -1521,7 +1538,20 @@ fn onStatus(
     back: u64,
     tip_prefix8: [8]u8,
 ) void {
-    _ = ctx_any;
+    const ctx = ctxFromAny(ctx_any);
+    if (ctx.pretty) {
+        pretty.printStatusLine(
+            ctx.lang,
+            slot,
+            block,
+            0.0,
+            ctx.utxo.count(),
+            fwd,
+            back,
+            tip_prefix8[0..],
+        );
+        return;
+    }
     std.debug.print(
         "STATUS slot={d} block={d} fwd={d} back={d} tip={s}\n",
         .{ slot, block, fwd, back, tip_prefix8[0..] },
@@ -1542,7 +1572,15 @@ fn onShutdown(ctx_any: *anyopaque) void {
     );
 }
 
-pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
+pub fn runWithOptions(
+    alloc: std.mem.Allocator,
+    host: []const u8,
+    port: u16,
+    lang: i18n.Lang,
+    debug: bool,
+    pretty_status: bool,
+) !void {
+    g_debug = debug;
     var ctx = FollowerCtx{
         .base = .{
             .cursor = try cursor_store.loadOrInit(alloc, cursor_path),
@@ -1550,12 +1588,15 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
             .current_block = null,
             .current_point = null,
             .roll_forward_count = 0,
-            .debug_verbose = DEBUG_VERBOSE,
+            .debug_verbose = debug,
         },
         .alloc = alloc,
         .tps_meter = null,
         .utxo = utxo_mod.UTxO.init(alloc),
         .undo_stack = std.ArrayList(utxo_mod.Undo).init(alloc),
+        .debug = debug,
+        .lang = lang,
+        .pretty = pretty_status,
         .prev_candidates = null,
         .prev_header_values = [_]?[]u8{null} ** 15,
         .prev_changed = [_]bool{false} ** 15,
@@ -1590,10 +1631,16 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
         file.close();
         ctx.utxo.deinit();
         ctx.utxo = try utxo_store.load(alloc, utxo_path);
-        std.debug.print("UTXO restored from disk (count={d})\n", .{ctx.utxo.count()});
+        std.debug.print(
+            "{s} (count={d})\n",
+            .{ i18n.msg(lang, "snapshot_loaded"), ctx.utxo.count() },
+        );
     }
     try utxo_store.save(utxo_path, &ctx.utxo);
-    std.debug.print("UTXO snapshot ready: {s} (count={d})\n", .{ utxo_path, ctx.utxo.count() });
+    std.debug.print(
+        "{s}: {s} (count={d})\n",
+        .{ i18n.msg(lang, "snapshot_ready"), utxo_path, ctx.utxo.count() },
+    );
 
     vprint(
         "cursor loaded: slot={d} block_no={d} fwd={d} back={d}\n",
@@ -1613,4 +1660,8 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
     };
 
     try follower.run(alloc, host, port, callbacks, &ctx);
+}
+
+pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
+    try runWithOptions(alloc, host, port, .en, true, false);
 }
