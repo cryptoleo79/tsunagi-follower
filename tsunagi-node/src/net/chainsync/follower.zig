@@ -665,20 +665,11 @@ fn headerHash32(alloc: std.mem.Allocator, block: cbor.Term) ?[32]u8 {
     return headerHashBlake2b256(header_info.cbor_bytes);
 }
 
-fn applyPreviewUtxo(ctx: *Context, alloc: std.mem.Allocator, block_body_bytes: []const u8) void {
+fn applyPreviewUtxo(ctx: *Context, alloc: std.mem.Allocator, deltas: tx_decode.TxDeltas) void {
     if (!ctx.preview_utxo) return;
     const utxo = ctx.utxo orelse return;
     const undo_stack = ctx.undo_stack orelse return;
-
-    const deltas = tx_decode.extractTxDeltas(alloc, block_body_bytes) catch |err| {
-        std.debug.print("UTXO delta decode failed: {s}\n", .{@errorName(err)});
-        var empty_undo = utxo_mod.Undo.init(alloc);
-        undo_stack.append(empty_undo) catch {
-            empty_undo.deinit();
-        };
-        return;
-    };
-    defer tx_decode.freeTxDeltas(alloc, deltas);
+    if (deltas.consumed.len == 0 and deltas.produced.len == 0) return;
 
     var undo = utxo.applyDelta(deltas.consumed, deltas.produced) catch |err| {
         std.debug.print("UTXO applyDelta failed: {s}\n", .{@errorName(err)});
@@ -929,8 +920,17 @@ pub fn run(
                                         } else if (!ctx.debug_verbose) {
                                             debug_body = false;
                                         }
-                                        const tx_count = extractTxCount(inner_bytes, alloc, debug_body);
-                                        applyPreviewUtxo(ctx, alloc, inner_bytes);
+                                        const deltas = tx_decode.extractTxDeltas(alloc, inner_bytes, debug_body) catch |err| blk: {
+                                            std.debug.print("UTXO delta decode failed: {s}\n", .{@errorName(err)});
+                                            break :blk tx_decode.TxDeltas{
+                                                .consumed = &[_]utxo_mod.TxIn{},
+                                                .produced = &[_]utxo_mod.Produced{},
+                                                .tx_count = 0,
+                                            };
+                                        };
+                                        defer tx_decode.freeTxDeltas(alloc, deltas);
+                                        const tx_count = deltas.tx_count;
+                                        applyPreviewUtxo(ctx, alloc, deltas);
 
                                         if (ctx.debug_verbose) {
                                             var header_prefix: [8]u8 = [_]u8{'?'} ** 8;
