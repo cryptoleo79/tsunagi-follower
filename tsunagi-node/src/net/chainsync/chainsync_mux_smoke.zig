@@ -5,12 +5,14 @@ const follower = @import("follower.zig");
 const journal = @import("../ledger/journal.zig");
 const tps = @import("../ledger/tps.zig");
 const utxo_mod = @import("../ledger/utxo.zig");
+const utxo_store = @import("../ledger/utxo_store.zig");
 const header_raw = @import("../ledger/header_raw.zig");
 const cursor_store = @import("../ledger/cursor.zig");
 
 const cursor_dir = "/home/midnight/.tsunagi";
 const cursor_path = "/home/midnight/.tsunagi/cursor.json";
 const journal_path = "/home/midnight/.tsunagi/journal.ndjson";
+const utxo_path = "/home/midnight/.tsunagi/utxo.snapshot";
 const DEBUG_VERBOSE = false;
 
 fn vprint(comptime fmt: []const u8, args: anytype) void {
@@ -1424,6 +1426,7 @@ fn onRollForward(
             "UTXO count={d} undo_depth={d}\n",
             .{ ctx.utxo.count(), ctx.undo_stack.items.len },
         );
+        utxo_store.save(utxo_path, &ctx.utxo) catch {};
     }
     var tip_prefix: [8]u8 = [_]u8{'?'} ** 8;
     if (tip_prefix8) |prefix| {
@@ -1571,10 +1574,26 @@ pub fn run(alloc: std.mem.Allocator, host: []const u8, port: u16) !void {
             undo.deinit();
         }
         ctx.undo_stack.deinit();
+        utxo_store.save(utxo_path, &ctx.utxo) catch {};
         ctx.utxo.deinit();
     }
 
     try ensureCursorDir();
+    {
+        var home = try std.fs.openDirAbsolute("/home/midnight", .{});
+        defer home.close();
+        try home.makePath(".tsunagi");
+    }
+
+    const utxo_file = std.fs.openFileAbsolute(utxo_path, .{}) catch null;
+    if (utxo_file) |file| {
+        file.close();
+        ctx.utxo.deinit();
+        ctx.utxo = try utxo_store.load(alloc, utxo_path);
+        std.debug.print("UTXO restored from disk (count={d})\n", .{ctx.utxo.count()});
+    }
+    try utxo_store.save(utxo_path, &ctx.utxo);
+    std.debug.print("UTXO snapshot ready: {s} (count={d})\n", .{ utxo_path, ctx.utxo.count() });
 
     vprint(
         "cursor loaded: slot={d} block_no={d} fwd={d} back={d}\n",
