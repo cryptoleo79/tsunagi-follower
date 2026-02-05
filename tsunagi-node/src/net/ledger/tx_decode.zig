@@ -1,5 +1,38 @@
 const std = @import("std");
 const cbor = @import("../cbor/term.zig");
+
+fn debugTxBodyShape(tx_list: cbor.Term) void {
+    // Debug-only shape probe: prints what tx_list actually is.
+    switch (tx_list) {
+        .array => |items| {
+            std.debug.print("TX_DECODE: tx_list=array len={d}\n", .{items.len});
+            if (items.len == 0) return;
+
+            const first = items[0];
+            switch (first) {
+                .map_u64 => std.debug.print("TX_DECODE: first=item map_u64\n", .{}),
+                .bytes => |b| {
+                    std.debug.print("TX_DECODE: first=item bytes len={d} head=0x{x:0>2}\n", .{ b.len, if (b.len > 0) b[0] else 0 });
+                },
+                .array => |a| std.debug.print("TX_DECODE: first=item array len={d}\n", .{a.len}),
+                .tag => |t| std.debug.print("TX_DECODE: first=item tag={d}\n", .{t.tag}),
+                .text => |t| std.debug.print("TX_DECODE: first=item text len={d}\n", .{t.len}),
+                .u64 => std.debug.print("TX_DECODE: first=item u64\n", .{}),
+                .i64 => std.debug.print("TX_DECODE: first=item i64\n", .{}),
+                .bool => std.debug.print("TX_DECODE: first=item bool\n", .{}),
+                .null => std.debug.print("TX_DECODE: first=item null\n", .{}),
+            }
+        },
+        .bytes => |b| std.debug.print("TX_DECODE: tx_list=bytes len={d}\n", .{b.len}),
+        .map_u64 => |m| std.debug.print("TX_DECODE: tx_list=map_u64 len={d}\n", .{m.len}),
+        .tag => |t| std.debug.print("TX_DECODE: tx_list=tag {d}\n", .{t.tag}),
+        .text => |t| std.debug.print("TX_DECODE: tx_list=text len={d}\n", .{t.len}),
+        .u64 => std.debug.print("TX_DECODE: tx_list=u64\n", .{}),
+        .i64 => std.debug.print("TX_DECODE: tx_list=i64\n", .{}),
+        .bool => std.debug.print("TX_DECODE: tx_list=bool\n", .{}),
+        .null => std.debug.print("TX_DECODE: tx_list=null\n", .{}),
+    }
+}
 const utxo = @import("utxo.zig");
 
 pub const TxDeltas = struct {
@@ -72,6 +105,7 @@ fn extractTxBodiesCountFromTerm(
     allow_recurse: bool,
 ) u64 {
     if (debug) std.debug.print("tx bodies top={s}\n", .{termKindName(top)});
+    debugTxBodyShape(top);
     if (extractBodyBytesIfWrapped(top)) |inner_body_bytes| {
         var inner_fbs = std.io.fixedBufferStream(inner_body_bytes);
         const inner_top = cbor.decode(alloc, inner_fbs.reader()) catch return 0;
