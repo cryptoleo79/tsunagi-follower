@@ -12,7 +12,6 @@ const tps = @import("../ledger/tps.zig");
 
 const chainsync_proto: u16 = 2;
 const keepalive_proto: u16 = 8;
-const DEBUG_VERBOSE = false;
 
 pub const Context = struct {
     cursor: cursor_store.Cursor,
@@ -731,12 +730,14 @@ pub fn run(
                                         } else {
                                             debug_body = true;
                                         }
-                                        if (debug_body) {
+                                        if (debug_body and ctx.debug_verbose) {
                                             last_body_debug_prefix = tip_prefix;
+                                        } else if (!ctx.debug_verbose) {
+                                            debug_body = false;
                                         }
                                         const tx_count = extractTxCount(inner_bytes, alloc, debug_body);
 
-                                        if (DEBUG_VERBOSE) {
+                                        if (ctx.debug_verbose) {
                                             var header_prefix: [8]u8 = [_]u8{'?'} ** 8;
                                             _ = try std.fmt.bufPrint(
                                                 &header_prefix,
@@ -750,7 +751,7 @@ pub fn run(
                                         }
 
                                         const now = std.time.timestamp();
-                                        tps_meter.addBlock(tx_count, now);
+                                        tps_meter.addBlock(tx_count, now, ctx.debug_verbose);
                                         ctx.roll_forward_count += 1;
                                         ctx.current_tip = next_msg.roll_forward.tip;
                                         ctx.current_block = next_msg.roll_forward.block;

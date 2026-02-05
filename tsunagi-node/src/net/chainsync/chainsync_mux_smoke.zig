@@ -1057,6 +1057,8 @@ const FollowerCtx = struct {
     debug: bool,
     lang: i18n.Lang,
     pretty: bool,
+    last_status_unix: i64 = 0,
+    stopping: bool = false,
     prev_candidates: ?[]HeaderCandidate = null,
     prev_header_values: [15]?[]u8 = [_]?[]u8{null} ** 15,
     prev_changed: [15]bool = [_]bool{false} ** 15,
@@ -1086,6 +1088,7 @@ fn onRollForward(
     _ = tip_hash32;
 
     const ctx = ctxFromAny(ctx_any);
+    if (ctx.stopping) return;
     const alloc = ctx.alloc;
     const tip = ctx.base.current_tip orelse return;
     const block = ctx.base.current_block orelse return;
@@ -1156,7 +1159,7 @@ fn onRollForward(
     if (has_tip_hash) {
         ctx.base.cursor.tip_hash_hex = new_tip_hash_hex;
     }
-    if (ctx.debug) {
+    if (ctx.debug and !ctx.stopping) {
         printBlockShallow(block);
         printBlockHash(alloc, block, tip_hash);
     }
@@ -1370,7 +1373,7 @@ fn onRollForward(
     ctx.prev_candidates = curr_candidates;
     ctx.prev_changed = curr_changed;
     if (ctx.debug) printTip(tip);
-    if (ctx.debug) {
+    if (ctx.debug and !ctx.stopping) {
         var header_prefix: [8]u8 = [_]u8{'?'} ** 8;
         _ = try std.fmt.bufPrint(
             &header_prefix,
@@ -1382,7 +1385,9 @@ fn onRollForward(
     ctx.base.cursor.roll_forward_count += 1;
     ctx.base.cursor.updated_unix = std.time.timestamp();
     try cursor_store.save(ctx.base.cursor, cursor_path);
-    std.debug.print("CURSOR saved {s}\n", .{cursor_path});
+    if (!ctx.stopping) {
+        std.debug.print("CURSOR saved {s}\n", .{cursor_path});
+    }
     try journal.appendRollForward(
         journal_path,
         std.time.timestamp(),
@@ -1393,15 +1398,15 @@ fn onRollForward(
         tx_count,
         ctx.utxo.count(),
     );
-    if (ctx.debug) {
+    if (ctx.debug and !ctx.stopping) {
         std.debug.print("JOURNAL append fwd\n", .{});
     }
     const now = std.time.timestamp();
     if (ctx.tps_meter == null) {
         ctx.tps_meter = tps.TpsMeter.init(now);
     }
-    ctx.tps_meter.?.addBlock(tx_count, now);
-    if (ctx.debug) {
+    ctx.tps_meter.?.addBlock(tx_count, now, ctx.debug);
+    if (ctx.debug and !ctx.stopping) {
         std.debug.print("TX_COUNT={d}\n", .{tx_count});
     }
     if (tx_count > 0) {
@@ -1433,7 +1438,7 @@ fn onRollForward(
             undo.deinit();
             return;
         };
-        if (ctx.debug) {
+        if (ctx.debug and !ctx.stopping) {
             std.debug.print(
                 "UTXO count={d} undo_depth={d}\n",
                 .{ ctx.utxo.count(), ctx.undo_stack.items.len },
@@ -1447,16 +1452,18 @@ fn onRollForward(
     }
     ctx.last_saved_tip_hex = tip_prefix;
     ctx.last_dup_tip_hex = null;
-    std.debug.print(
-        "ROLL FWD slot={d} block={d} tip={s} fwd={d} back={d}\n",
-        .{
-            ctx.base.cursor.slot,
-            ctx.base.cursor.block_no,
-            tip_prefix[0..],
-            ctx.base.cursor.roll_forward_count,
-            ctx.base.cursor.roll_backward_count,
-        },
-    );
+    if (!ctx.stopping) {
+        std.debug.print(
+            "ROLL FWD slot={d} block={d} tip={s} fwd={d} back={d}\n",
+            .{
+                ctx.base.cursor.slot,
+                ctx.base.cursor.block_no,
+                tip_prefix[0..],
+                ctx.base.cursor.roll_forward_count,
+                ctx.base.cursor.roll_backward_count,
+            },
+        );
+    }
 }
 
 fn onRollBackward(
@@ -1470,9 +1477,10 @@ fn onRollBackward(
     _ = tip_hash32;
 
     const ctx = ctxFromAny(ctx_any);
+    if (ctx.stopping) return;
     const tip = ctx.base.current_tip orelse return;
 
-    if (ctx.debug) {
+    if (ctx.debug and !ctx.stopping) {
         if (ctx.base.current_point) |point| {
             printPoint(point);
         }
@@ -1481,7 +1489,9 @@ fn onRollBackward(
     ctx.base.cursor.roll_backward_count += 1;
     ctx.base.cursor.updated_unix = std.time.timestamp();
     try cursor_store.save(ctx.base.cursor, cursor_path);
-    std.debug.print("CURSOR saved {s}\n", .{cursor_path});
+    if (!ctx.stopping) {
+        std.debug.print("CURSOR saved {s}\n", .{cursor_path});
+    }
     try journal.appendRollBackward(
         journal_path,
         std.time.timestamp(),
@@ -1489,7 +1499,7 @@ fn onRollBackward(
         ctx.base.cursor.block_no,
         ctx.base.cursor.tip_hash_hex[0..],
     );
-    if (ctx.debug) {
+    if (ctx.debug and !ctx.stopping) {
         std.debug.print("JOURNAL append back\n", .{});
     }
     if (ctx.undo_stack.items.len > 0) {
@@ -1497,7 +1507,7 @@ fn onRollBackward(
         ctx.utxo.rollbackDelta(&undo);
         undo.deinit();
     }
-    if (ctx.debug) {
+    if (ctx.debug and !ctx.stopping) {
         std.debug.print(
             "UTXO rollback count={d} undo_depth={d}\n",
             .{ ctx.utxo.count(), ctx.undo_stack.items.len },
@@ -1518,16 +1528,18 @@ fn onRollBackward(
             );
         }
     }
-    std.debug.print(
-        "ROLL BACK slot={d} block={d} tip={s} fwd={d} back={d}\n",
-        .{
-            ctx.base.cursor.slot,
-            ctx.base.cursor.block_no,
-            tip_prefix[0..],
-            ctx.base.cursor.roll_forward_count,
-            ctx.base.cursor.roll_backward_count,
-        },
-    );
+    if (!ctx.stopping) {
+        std.debug.print(
+            "ROLL BACK slot={d} block={d} tip={s} fwd={d} back={d}\n",
+            .{
+                ctx.base.cursor.slot,
+                ctx.base.cursor.block_no,
+                tip_prefix[0..],
+                ctx.base.cursor.roll_forward_count,
+                ctx.base.cursor.roll_backward_count,
+            },
+        );
+    }
 }
 
 fn onStatus(
@@ -1539,6 +1551,10 @@ fn onStatus(
     tip_prefix8: [8]u8,
 ) void {
     const ctx = ctxFromAny(ctx_any);
+    if (ctx.stopping) return;
+    const now = std.time.timestamp();
+    if (now - ctx.last_status_unix < 3) return;
+    ctx.last_status_unix = now;
     if (ctx.pretty) {
         pretty.printStatusLine(
             ctx.lang,
@@ -1560,6 +1576,7 @@ fn onStatus(
 
 fn onShutdown(ctx_any: *anyopaque) void {
     const ctx = ctxFromAny(ctx_any);
+    ctx.stopping = true;
     std.debug.print(
         "Final cursor: slot={d} block={d} fwd={d} back={d} tip={s}\n",
         .{
