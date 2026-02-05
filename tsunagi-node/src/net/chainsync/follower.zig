@@ -700,6 +700,7 @@ pub fn run(
 
     var tps_meter = tps.TpsMeter.init(std.time.timestamp());
     var last_body_debug_prefix: ?[8]u8 = null;
+    var force_debug_rollforwards: u8 = 2;
 
     var last_tip: ?cbor.Term = null;
     defer if (last_tip) |tip| {
@@ -920,17 +921,103 @@ pub fn run(
                                         } else if (!ctx.debug_verbose) {
                                             debug_body = false;
                                         }
-                                        const deltas = tx_decode.extractTxDeltas(alloc, inner_bytes, debug_body) catch |err| blk: {
-                                            std.debug.print("UTXO delta decode failed: {s}\n", .{@errorName(err)});
-                                            break :blk tx_decode.TxDeltas{
-                                                .consumed = &[_]utxo_mod.TxIn{},
-                                                .produced = &[_]utxo_mod.Produced{},
-                                                .tx_count = 0,
-                                            };
+                                        const force_debug = force_debug_rollforwards > 0;
+                                        const effective_debug = debug_body or force_debug;
+                                        var block_body_bytes_opt: ?[]const u8 = null;
+                                        var body_top: ?cbor.Term = null;
+                                        var body_fbs = std.io.fixedBufferStream(inner_bytes);
+                                        if (cbor.decode(alloc, body_fbs.reader())) |decoded| {
+                                            body_top = decoded;
+                                            if (body_top.? == .array and body_top.?.array.len >= 2) {
+                                                const body_term = body_top.?.array[1];
+                                                block_body_bytes_opt = switch (body_term) {
+                                                    .bytes => |b| b,
+                                                    .tag => |t| blk: {
+                                                        if (t.tag == 24 and t.value.* == .bytes) {
+                                                            break :blk t.value.*.bytes;
+                                                        }
+                                                        break :blk null;
+                                                    },
+                                                    else => null,
+                                                };
+                                            }
+                                        } else |_| {
+                                            if (ctx.debug_verbose) {
+                                                std.debug.print("TX_BODY decode failed (inner_bytes)\n", .{});
+                                            }
+                                        }
+                                        defer if (body_top) |t| cbor.free(t, alloc);
+
+                                        var tx_count: u64 = 0;
+                                        var deltas = tx_decode.TxDeltas{
+                                            .consumed = &[_]utxo_mod.TxIn{},
+                                            .produced = &[_]utxo_mod.Produced{},
+                                            .tx_count = 0,
                                         };
-                                        defer tx_decode.freeTxDeltas(alloc, deltas);
-                                        const tx_count = deltas.tx_count;
-                                        applyPreviewUtxo(ctx, alloc, deltas);
+                                        if (block_body_bytes_opt) |block_body_bytes| {
+                                            var tx_list: ?[]cbor.Term = null;
+                                            var tx_list_kind: []const u8 = "unknown";
+                                            var body_term: ?cbor.Term = null;
+                                            var tx_body_fbs = std.io.fixedBufferStream(block_body_bytes);
+                                            if (cbor.decode(alloc, tx_body_fbs.reader())) |decoded| {
+                                                body_term = decoded;
+                                                if (body_term.? == .array) {
+                                                    const items = body_term.?.array;
+                                                    if (items.len > 0 and items[0] == .array) {
+                                                        tx_list = items[0].array;
+                                                    } else {
+                                                        for (items) |item| {
+                                                            if (item != .array or item.array.len == 0) continue;
+                                                            const first = item.array[0];
+                                                            if (first == .bytes or
+                                                                (first == .tag and
+                                                                first.tag.tag == 24 and
+                                                                first.tag.value.* == .bytes) or
+                                                                first == .map_u64)
+                                                            {
+                                                                tx_list = item.array;
+                                                                break;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            } else |_| {}
+                                            defer if (body_term) |t| cbor.free(t, alloc);
+
+                                            if (tx_list) |list| {
+                                                tx_count = @intCast(list.len);
+                                                if (list.len > 0) {
+                                                    const first = list[0];
+                                                    tx_list_kind = if (first == .bytes)
+                                                        "bytes"
+                                                    else if (first == .tag and
+                                                        first.tag.tag == 24 and
+                                                        first.tag.value.* == .bytes)
+                                                        "tag24"
+                                                    else if (first == .map_u64)
+                                                        "map"
+                                                    else
+                                                        "unknown";
+                                                }
+                                                if (ctx.debug_verbose) {
+                                                    std.debug.print(
+                                                        "tx_list_kind={s} tx_count={d}\n",
+                                                        .{ tx_list_kind, tx_count },
+                                                    );
+                                                }
+                                                if (list.len > 0) {
+                                                    deltas = tx_decode.extractTxDeltas(alloc, list, debug_body) catch deltas;
+                                                    if (ctx.debug_verbose and tx_count > 0 and
+                                                        deltas.consumed.len == 0 and deltas.produced.len == 0)
+                                                    {
+                                                        std.debug.print("tx_count>0 but deltas empty\n", .{});
+                                                    }
+                                                    defer tx_decode.freeTxDeltas(alloc, deltas);
+                                                    applyPreviewUtxo(ctx, alloc, deltas);
+                                                }
+                                            }
+                                        }
+                                        if (force_debug_rollforwards > 0) force_debug_rollforwards -= 1;
 
                                         if (ctx.debug_verbose) {
                                             var header_prefix: [8]u8 = [_]u8{'?'} ** 8;
