@@ -962,6 +962,40 @@ pub fn run(
                                             var tx_body_fbs = std.io.fixedBufferStream(block_body_bytes);
                                             if (cbor.decode(alloc, tx_body_fbs.reader())) |decoded| {
                                                 body_term = decoded;
+                                                if (ctx.debug_verbose) {
+                                                    std.debug.print(
+                                                        "TX_BODY_STRUCT: kind={s} (after decoding block_body_bytes)\n",
+                                                        .{@tagName(body_term.?)},
+                                                    );
+                                                    if (body_term.? == .array) {
+                                                        std.debug.print(
+                                                            "TX_BODY_STRUCT: array_len={d}\n",
+                                                            .{body_term.?.array.len},
+                                                        );
+                                                        if (body_term.?.array.len > 0) {
+                                                            std.debug.print(
+                                                                "TX_BODY_STRUCT: array0_kind={s}\n",
+                                                                .{@tagName(body_term.?.array[0])},
+                                                            );
+                                                        }
+                                                    } else if (body_term.? == .map_u64) {
+                                                        std.debug.print(
+                                                            "TX_BODY_STRUCT: map_u64_len={d}\n",
+                                                            .{body_term.?.map_u64.len},
+                                                        );
+                                                    } else if (body_term.? == .bytes) {
+                                                        std.debug.print(
+                                                            "TX_BODY_STRUCT: bytes_len={d}\n",
+                                                            .{body_term.?.bytes.len},
+                                                        );
+                                                    } else if (body_term.? == .tag) {
+                                                        std.debug.print(
+                                                            "TX_BODY_STRUCT: tag={d} inner_kind={s}\n",
+                                                            .{ body_term.?.tag.tag, @tagName(body_term.?.tag.value.*) },
+                                                        );
+                                                    }
+                                                }
+
                                                 if (body_term.? == .array) {
                                                     const items = body_term.?.array;
                                                     if (items.len > 0 and items[0] == .array) {

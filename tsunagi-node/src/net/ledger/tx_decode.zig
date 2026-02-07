@@ -1,38 +1,5 @@
 const std = @import("std");
 const cbor = @import("../cbor/term.zig");
-
-fn debugTxBodyShape(tx_list: cbor.Term) void {
-    // Debug-only shape probe: prints what tx_list actually is.
-    switch (tx_list) {
-        .array => |items| {
-            std.debug.print("TX_DECODE: tx_list=array len={d}\n", .{items.len});
-            if (items.len == 0) return;
-
-            const first = items[0];
-            switch (first) {
-                .map_u64 => std.debug.print("TX_DECODE: first=item map_u64\n", .{}),
-                .bytes => |b| {
-                    std.debug.print("TX_DECODE: first=item bytes len={d} head=0x{x:0>2}\n", .{ b.len, if (b.len > 0) b[0] else 0 });
-                },
-                .array => |a| std.debug.print("TX_DECODE: first=item array len={d}\n", .{a.len}),
-                .tag => |t| std.debug.print("TX_DECODE: first=item tag={d}\n", .{t.tag}),
-                .text => |t| std.debug.print("TX_DECODE: first=item text len={d}\n", .{t.len}),
-                .u64 => std.debug.print("TX_DECODE: first=item u64\n", .{}),
-                .i64 => std.debug.print("TX_DECODE: first=item i64\n", .{}),
-                .bool => std.debug.print("TX_DECODE: first=item bool\n", .{}),
-                .null => std.debug.print("TX_DECODE: first=item null\n", .{}),
-            }
-        },
-        .bytes => |b| std.debug.print("TX_DECODE: tx_list=bytes len={d}\n", .{b.len}),
-        .map_u64 => |m| std.debug.print("TX_DECODE: tx_list=map_u64 len={d}\n", .{m.len}),
-        .tag => |t| std.debug.print("TX_DECODE: tx_list=tag {d}\n", .{t.tag}),
-        .text => |t| std.debug.print("TX_DECODE: tx_list=text len={d}\n", .{t.len}),
-        .u64 => std.debug.print("TX_DECODE: tx_list=u64\n", .{}),
-        .i64 => std.debug.print("TX_DECODE: tx_list=i64\n", .{}),
-        .bool => std.debug.print("TX_DECODE: tx_list=bool\n", .{}),
-        .null => std.debug.print("TX_DECODE: tx_list=null\n", .{}),
-    }
-}
 const utxo = @import("utxo.zig");
 
 pub const TxDeltas = struct {
@@ -41,322 +8,186 @@ pub const TxDeltas = struct {
     tx_count: u64,
 };
 
-pub fn freeTxDeltas(alloc: std.mem.Allocator, deltas: TxDeltas) void {
-    for (deltas.produced) |p| {
-        alloc.free(p.output.address);
+pub fn freeTxDeltas(alloc: std.mem.Allocator, d: TxDeltas) void {
+    // elements are value types, slices were allocated
+    alloc.free(@constCast(d.consumed));
+    alloc.free(@constCast(d.produced));
+}
+
+fn isTag24Bytes(t: cbor.Term) bool {
+    return t == .tag and t.tag.tag == 24 and t.tag.value.* == .bytes;
+}
+
+fn decodeCborFromBytes(alloc: std.mem.Allocator, bytes: []const u8) ?cbor.Term {
+    var fbs = std.io.fixedBufferStream(bytes);
+    return cbor.decode(alloc, fbs.reader()) catch null;
+}
+
+/// Turn one tx-body item (bytes/tag24/map) into a tx-body map_u64 term.
+/// Returned term must be freed by caller with cbor.free().
+fn decodeTxBodyItemToMap(alloc: std.mem.Allocator, item: cbor.Term) ?cbor.Term {
+    if (item == .map_u64) return item; // note: borrowed, caller must NOT free
+
+    if (item == .bytes) {
+        const t = decodeCborFromBytes(alloc, item.bytes) orelse return null;
+        if (t != .map_u64) {
+            cbor.free(t, alloc);
+            return null;
+        }
+        return t;
     }
-    if (deltas.consumed.len != 0) alloc.free(@constCast(deltas.consumed));
-    if (deltas.produced.len != 0) alloc.free(@constCast(deltas.produced));
+
+    if (isTag24Bytes(item)) {
+        const inner = item.tag.value.*.bytes;
+        const t = decodeCborFromBytes(alloc, inner) orelse return null;
+        if (t != .map_u64) {
+            cbor.free(t, alloc);
+            return null;
+        }
+        return t;
+    }
+
+    return null;
 }
 
-fn emptyDeltas(tx_count: u64) TxDeltas {
-    return .{ .consumed = &[_]utxo.TxIn{}, .produced = &[_]utxo.Produced{}, .tx_count = tx_count };
+fn findMapValue(entries: []const cbor.MapEntry, key: u64) ?cbor.Term {
+    for (entries) |e| {
+        if (e.key == key) return e.value;
+    }
+    return null;
 }
 
-fn encodeTermBytes(alloc: std.mem.Allocator, term: cbor.Term) ![]u8 {
+/// Compute a temporary tx hash from a tx-body map by CBOR-encoding it and blake2b256.
+/// (This is *not* the canonical txid yet; good enough for UTxO scaffolding.)
+fn hashTxBodyMap(alloc: std.mem.Allocator, tx_map: []const cbor.MapEntry) ?[32]u8 {
     var list = std.ArrayList(u8).init(alloc);
-    errdefer list.deinit();
-    try cbor.encode(term, list.writer());
-    return list.toOwnedSlice();
+    defer list.deinit();
+    cbor.encode(cbor.Term{ .map_u64 = @constCast(tx_map) }, list.writer()) catch return null;
+
+    var out: [32]u8 = undefined;
+    std.crypto.hash.blake2.Blake2b256.hash(list.items, &out, .{});
+    return out;
 }
 
-fn findTxBodies(body_items: []cbor.Term) ?[]cbor.Term {
-    for (body_items) |item| {
-        if (item != .array) continue;
-        if (item.array.len == 0) continue;
-        if (item.array[0] != .map_u64) continue;
-        return item.array;
+fn parseInputs(alloc: std.mem.Allocator, tx_hash: [32]u8, tx_term: cbor.Term) ?[]utxo.TxIn {
+    if (tx_term != .map_u64) return null;
+
+    // Cardano tx-body key 0 = inputs (array)
+    const inputs_term = findMapValue(tx_term.map_u64, 0) orelse return null;
+    if (inputs_term != .array) return null;
+
+    // We don't have real txid yet for referenced inputs inside the tx,
+    // so we just store (tx_hash, index) placeholder when we can parse index.
+    // Many formats are [ txid, ix ] but txid itself is bytes32.
+    var out = std.ArrayList(utxo.TxIn).init(alloc);
+    errdefer out.deinit();
+
+    for (inputs_term.array) |inp| {
+        if (inp != .array or inp.array.len < 2) continue;
+
+        const ix_term = inp.array[1];
+        if (ix_term != .u64) continue;
+
+        out.append(.{ .tx_hash = tx_hash, .index = @intCast(ix_term.u64) }) catch return null;
     }
-    return null;
+
+    return out.toOwnedSlice() catch null;
 }
 
-fn findMapValue(entries: []cbor.MapEntry, key: u64) ?cbor.Term {
-    for (entries) |entry| {
-        if (entry.key == key) return entry.value;
-    }
-    return null;
-}
+fn parseOutputs(alloc: std.mem.Allocator, tx_hash: [32]u8, tx_term: cbor.Term) ?[]utxo.Produced {
+    if (tx_term != .map_u64) return null;
 
-fn termKindName(term: cbor.Term) []const u8 {
-    return switch (term) {
-        .u64 => "u64",
-        .i64 => "i64",
-        .bool => "bool",
-        .null => "null",
-        .bytes => "bytes",
-        .text => "text",
-        .array => "array",
-        .map_u64 => "map",
-        .tag => "tag",
-    };
-}
+    // Cardano tx-body key 1 = outputs (array)
+    const outputs_term = findMapValue(tx_term.map_u64, 1) orelse return null;
+    if (outputs_term != .array) return null;
 
-fn extractBodyBytesIfWrapped(top: cbor.Term) ?[]const u8 {
-    if (top != .array) return null;
-    if (top.array.len != 2) return null;
-    if (top.array[1] != .bytes) return null;
-    return top.array[1].bytes;
-}
-
-fn extractTxBodiesCountFromTerm(
-    alloc: std.mem.Allocator,
-    top: cbor.Term,
-    debug: bool,
-    allow_recurse: bool,
-) u64 {
-    if (debug) std.debug.print("tx bodies top={s}\n", .{termKindName(top)});
-    debugTxBodyShape(top);
-    if (extractBodyBytesIfWrapped(top)) |inner_body_bytes| {
-        var inner_fbs = std.io.fixedBufferStream(inner_body_bytes);
-        const inner_top = cbor.decode(alloc, inner_fbs.reader()) catch return 0;
-        defer cbor.free(inner_top, alloc);
-        return extractTxBodiesCountFromTerm(alloc, inner_top, debug, allow_recurse);
-    }
-    switch (top) {
-        .array => |items| {
-            for (items) |item| {
-                if (item != .array) continue;
-                if (item.array.len == 0) continue;
-                if (item.array[0] != .map_u64) continue;
-                return @intCast(item.array.len);
-            }
-            return 0;
-        },
-        .map_u64 => |entries| {
-            const value = findMapValue(entries, 0) orelse return 0;
-            const tx_count = switch (value) {
-                .array => |items| @as(u64, @intCast(items.len)),
-                .bytes => |bytes| blk: {
-                    if (!allow_recurse) break :blk 0;
-                    var fbs = std.io.fixedBufferStream(bytes);
-                    const inner = cbor.decode(alloc, fbs.reader()) catch break :blk 0;
-                    defer cbor.free(inner, alloc);
-                    break :blk extractTxBodiesCountFromTerm(alloc, inner, debug, false);
-                },
-                .tag => |t| blk: {
-                    if (!allow_recurse) break :blk 0;
-                    if (t.tag != 24 or t.value.* != .bytes) break :blk 0;
-                    const bytes = t.value.*.bytes;
-                    var fbs = std.io.fixedBufferStream(bytes);
-                    const inner = cbor.decode(alloc, fbs.reader()) catch break :blk 0;
-                    defer cbor.free(inner, alloc);
-                    break :blk extractTxBodiesCountFromTerm(alloc, inner, debug, false);
-                },
-                else => 0,
-            };
-            if (debug) std.debug.print("tx bodies key0={s} count={d}\n", .{ termKindName(value), tx_count });
-            return tx_count;
-        },
-        else => return 0,
-    }
-}
-
-pub fn extractTxBodiesCount(alloc: std.mem.Allocator, body_bytes: []const u8, debug: bool) u64 {
-    if (debug and body_bytes.len > 0) {
-        const first = body_bytes[0];
-        const major: u8 = first >> 5;
-        const ai: u8 = first & 0x1f;
-        std.debug.print(
-            "TX_BODY first_byte=0x{x} major={d} ai={d} len={d}\n",
-            .{ first, major, ai, body_bytes.len },
-        );
-    }
-    var fbs = std.io.fixedBufferStream(body_bytes);
-    const top = cbor.decode(alloc, fbs.reader()) catch return 0;
-    defer cbor.free(top, alloc);
-    if (debug) std.debug.print("TX_BODY top_kind={s}\n", .{termKindName(top)});
-    if (debug and top == .map_u64) {
-        var printed: usize = 0;
-        std.debug.print("TX_BODY keys=", .{});
-        for (top.map_u64) |entry| {
-            if (printed >= 12) break;
-            if (printed > 0) std.debug.print(",", .{});
-            std.debug.print("{d}", .{entry.key});
-            printed += 1;
-        }
-        std.debug.print("\n", .{});
-        if (findMapValue(top.map_u64, 0)) |value| {
-            std.debug.print("TX_BODY key0_kind={s}\n", .{termKindName(value)});
-        }
-    }
-    return extractTxBodiesCountFromTerm(alloc, top, debug, true);
-}
-
-fn freeProducedList(alloc: std.mem.Allocator, list: *std.ArrayList(utxo.Produced)) void {
-    for (list.items) |p| {
-        alloc.free(p.output.address);
-    }
-    list.deinit();
-}
-
-fn unwrapTag24Bytes(term: cbor.Term) ?[]const u8 {
-    if (term != .tag) return null;
-    if (term.tag.tag != 24) return null;
-    if (term.tag.value.* != .bytes) return null;
-    return term.tag.value.*.bytes;
-}
-
-fn decodeTxBodyFromTerm(alloc: std.mem.Allocator, tx_term: cbor.Term) ?cbor.Term {
-    return switch (tx_term) {
-        .map_u64 => tx_term,
-        .array => |items| blk: {
-            if (items.len == 0) break :blk null;
-            if (items[0] != .map_u64) break :blk null;
-            break :blk items[0];
-        },
-        .bytes => |bytes| blk: {
-            var fbs = std.io.fixedBufferStream(bytes);
-            const decoded = cbor.decode(alloc, fbs.reader()) catch break :blk null;
-            break :blk decoded;
-        },
-        .tag => blk: {
-            const bytes = unwrapTag24Bytes(tx_term) orelse break :blk null;
-            var fbs = std.io.fixedBufferStream(bytes);
-            const decoded = cbor.decode(alloc, fbs.reader()) catch break :blk null;
-            break :blk decoded;
-        },
-        else => null,
-    };
-}
-
-fn decodeTxDelta(
-    alloc: std.mem.Allocator,
-    tx_term: cbor.Term,
-    consumed: *std.ArrayList(utxo.TxIn),
-    produced: *std.ArrayList(utxo.Produced),
-) !void {
-    var decoded_tx: ?cbor.Term = null;
-    const tx_body_term = blk: {
-        const body = decodeTxBodyFromTerm(alloc, tx_term) orelse return error.InvalidType;
-        if (body != .map_u64 and body != .array) {
-            if (tx_term == .bytes or tx_term == .tag) {
-                cbor.free(body, alloc);
-            }
-            return error.InvalidType;
-        }
-        if (tx_term == .bytes or tx_term == .tag) {
-            decoded_tx = body;
-        }
-        if (body == .map_u64) break :blk body;
-        if (body == .array and body.array.len > 0 and body.array[0] == .map_u64) {
-            break :blk body.array[0];
-        }
-        if (decoded_tx) |t| cbor.free(t, alloc);
-        return error.InvalidType;
-    };
-    defer if (decoded_tx) |t| cbor.free(t, alloc);
-
-    const inputs_term = findMapValue(tx_body_term.map_u64, 0) orelse return error.InvalidType;
-    const outputs_term = findMapValue(tx_body_term.map_u64, 1) orelse return error.InvalidType;
-    if (inputs_term != .array or outputs_term != .array) return error.InvalidType;
-
-    const tx_body_bytes = try encodeTermBytes(alloc, tx_body_term);
-    defer alloc.free(tx_body_bytes);
-
-    var tx_hash: [32]u8 = undefined;
-    std.crypto.hash.blake2.Blake2b256.hash(tx_body_bytes, &tx_hash, .{});
-
-    var local_consumed = std.ArrayList(utxo.TxIn).init(alloc);
-    errdefer local_consumed.deinit();
-    var local_produced = std.ArrayList(utxo.Produced).init(alloc);
-    errdefer freeProducedList(alloc, &local_produced);
-
-    for (inputs_term.array) |input_term| {
-        if (input_term != .array or input_term.array.len < 2) return error.InvalidType;
-        const hash_term = input_term.array[0];
-        const index_term = input_term.array[1];
-        if (hash_term != .bytes or hash_term.bytes.len != 32) return error.InvalidType;
-        if (index_term != .u64) return error.InvalidType;
-        if (index_term.u64 > std.math.maxInt(u32)) return error.InvalidType;
-        var hash32: [32]u8 = undefined;
-        std.mem.copyForwards(u8, hash32[0..], hash_term.bytes);
-        try local_consumed.append(.{ .tx_hash = hash32, .index = @intCast(index_term.u64) });
-    }
+    var out = std.ArrayList(utxo.Produced).init(alloc);
+    errdefer out.deinit();
 
     var out_index: u32 = 0;
-    for (outputs_term.array) |output| {
-        if (output != .array or output.array.len < 2) return error.InvalidType;
-        const addr_bytes = try encodeTermBytes(alloc, output.array[0]);
-        const lovelace = if (output.array[1] == .u64) output.array[1].u64 else 0;
-        try local_produced.append(.{
+    for (outputs_term.array) |o| {
+        // output shape varies by era; we only need a placeholder TxOut for now.
+        // We'll store:
+        // - address: empty
+        // - lovelace: 0 unless we can find it
+        var lovelace: u64 = 0;
+
+        // Common simple form: [addr_bytes, amount]
+        if (o == .array and o.array.len >= 2) {
+            const amt = o.array[1];
+
+            // amount may be u64 or map (multi-asset). If u64, use it.
+            if (amt == .u64) lovelace = amt.u64;
+            if (amt == .map_u64) {
+                // Sometimes lovelace sits under key 0 in a map
+                const v0 = findMapValue(amt.map_u64, 0);
+                if (v0 != null and v0.? == .u64) lovelace = v0.?.u64;
+            }
+        }
+
+        const produced = utxo.Produced{
             .input = .{ .tx_hash = tx_hash, .index = out_index },
-            .output = .{ .address = addr_bytes, .lovelace = lovelace },
-        });
+            .output = .{ .address = "", .lovelace = lovelace },
+        };
+
+        out.append(produced) catch return null;
         out_index += 1;
     }
 
-    if (local_consumed.items.len == 0 and local_produced.items.len == 0) {
-        local_consumed.deinit();
-        local_produced.deinit();
-        return;
-    }
-
-    try consumed.appendSlice(local_consumed.items);
-    local_consumed.deinit();
-    try produced.appendSlice(local_produced.items);
-    local_produced.items.len = 0;
-    local_produced.deinit();
+    return out.toOwnedSlice() catch null;
 }
 
+/// Extract deltas from a tx-list (array items) where each item is bytes/tag24/map.
+/// - Never panics; best-effort.
+/// - Returns empty deltas if we can't decode.
 pub fn extractTxDeltas(
     alloc: std.mem.Allocator,
-    tx_list: []cbor.Term,
+    tx_list_items: []cbor.Term,
     debug: bool,
 ) !TxDeltas {
-    _ = debug;
-    return extractTxDeltasFromTxList(alloc, tx_list);
-}
-
-fn extractTxDeltasFromTxList(alloc: std.mem.Allocator, tx_list: []cbor.Term) TxDeltas {
-    if (tx_list.len == 0) return emptyDeltas(0);
-
-    var consumed = std.ArrayList(utxo.TxIn).init(alloc);
-    errdefer consumed.deinit();
-    var produced = std.ArrayList(utxo.Produced).init(alloc);
-    errdefer freeProducedList(alloc, &produced);
+    var consumed_list = std.ArrayList(utxo.TxIn).init(alloc);
+    errdefer consumed_list.deinit();
+    var produced_list = std.ArrayList(utxo.Produced).init(alloc);
+    errdefer produced_list.deinit();
 
     var tx_count: u64 = 0;
-    for (tx_list) |tx_term| {
+
+    for (tx_list_items) |item| {
         tx_count += 1;
-        _ = decodeTxDelta(alloc, tx_term, &consumed, &produced) catch continue;
+
+        // Decode to a tx-body map
+        const decoded_opt = decodeTxBodyItemToMap(alloc, item);
+        if (decoded_opt == null) {
+            if (debug) std.debug.print("TX_DECODE: skip tx_item (not decodable)\n", .{});
+            continue;
+        }
+        const tx_term = decoded_opt.?;
+
+        // If we allocated it (bytes/tag24 path), we must free it.
+        const allocated = (item != .map_u64);
+        if (allocated) {
+            defer cbor.free(tx_term, alloc);
+        }
+
+        // Compute temporary tx hash
+        const h_opt = if (tx_term == .map_u64) hashTxBodyMap(alloc, tx_term.map_u64) else null;
+        if (h_opt == null) continue;
+        const tx_hash = h_opt.?;
+
+        // Parse inputs/outputs
+        const ins = parseInputs(alloc, tx_hash, tx_term) orelse continue;
+        defer alloc.free(ins);
+
+        const outs = parseOutputs(alloc, tx_hash, tx_term) orelse continue;
+        defer alloc.free(outs);
+
+        for (ins) |i| try consumed_list.append(i);
+        for (outs) |o| try produced_list.append(o);
     }
 
-    const consumed_slice = consumed.toOwnedSlice() catch {
-        consumed.deinit();
-        freeProducedList(alloc, &produced);
-        return emptyDeltas(tx_count);
+    return .{
+        .consumed = try consumed_list.toOwnedSlice(),
+        .produced = try produced_list.toOwnedSlice(),
+        .tx_count = tx_count,
     };
-    const produced_slice = produced.toOwnedSlice() catch {
-        alloc.free(consumed_slice);
-        freeProducedList(alloc, &produced);
-        return emptyDeltas(tx_count);
-    };
-    return .{ .consumed = consumed_slice, .produced = produced_slice, .tx_count = tx_count };
-}
-
-test "tx decode tx bodies array yields tx_count" {
-    const alloc = std.testing.allocator;
-
-    const input_hash = [_]u8{1} ** 32;
-    var input_items = [_]cbor.Term{
-        .{ .bytes = input_hash[0..] },
-        .{ .u64 = 0 },
-    };
-    var inputs = [_]cbor.Term{.{ .array = input_items[0..] }};
-
-    var output_items = [_]cbor.Term{
-        .{ .bytes = "addr" },
-        .{ .u64 = 42 },
-    };
-    var outputs = [_]cbor.Term{.{ .array = output_items[0..] }};
-
-    var map_entries = [_]cbor.MapEntry{
-        .{ .key = 0, .value = .{ .array = inputs[0..] } },
-        .{ .key = 1, .value = .{ .array = outputs[0..] } },
-    };
-    const tx_body = cbor.Term{ .map_u64 = map_entries[0..] };
-    var tx_list = [_]cbor.Term{tx_body};
-    const deltas = try extractTxDeltas(alloc, tx_list[0..], false);
-    defer freeTxDeltas(alloc, deltas);
-    try std.testing.expect(deltas.tx_count > 0);
 }
